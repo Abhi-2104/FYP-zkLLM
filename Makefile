@@ -3,13 +3,13 @@ NVCC := $(CONDA_PREFIX)/bin/nvcc
 
 # Include and library paths
 INCLUDES := -I$(CONDA_PREFIX)/include
-LIBS := -L$(CONDA_PREFIX)/lib
+LIBS := -L$(CONDA_PREFIX)/lib -lcudart -lstdc++
 
 # get compute capability from retrieved value
 ARCH := sm_86
 
 # NVCC compiler flags
-NVCC_FLAGS := -arch=$(ARCH) -std=c++17
+NVCC_FLAGS := -arch=$(ARCH) -std=c++17 --compiler-bindir=/usr/bin/gcc-12
 
 # Source and object files
 CU_SRCS := bls12-381.cu ioutils.cu commitment.cu fr-tensor.cu g1-tensor.cu proof.cu zkrelu.cu zkfc.cu tlookup.cu polynomial.cu zksoftmax.cu rescaling.cu
