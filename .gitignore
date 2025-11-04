@@ -1,11 +1,27 @@
+# Ignore everything by default
 *
+
+# --- Allowlist ---
+
+# Keep this .gitignore file
+!.gitignore
+
+# Keep the original project README
+!README.md
+
+# Allow the new activation capture files and directories
+!activation_capture_readme.md
+!capture_activations.py
+!activation_capture/
+!activations/
+
+# --- Original Project Files ---
+# Keep the core source and build files from the original project
 !*.cu
 !*.h
 !*.cuh
 !*.cpp
 !*.hpp
-!*.py
 !Makefile
-!.gitignore
 !CMakeLists.txt
-!README.md
+!*.py
