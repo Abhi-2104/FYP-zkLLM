@@ -24,9 +24,8 @@ int main(int argc, char *argv[])
     );
 
     FrTensor X = FrTensor::from_int_bin(input_file_name);
-    FrTensor rms_inv_temp = FrTensor::from_int_bin("rms_inv_temp.bin");
+    FrTensor rms_inv_temp = FrTensor::from_int_bin("rms_inv_temp.bin"); 
 
-    // create an all 1 tensor with size embed_dim * embed_dim
     FrTensor all_one(seq_len);
     all_one *= {0, 0, 0, 0, 0, 0, 0, 0};
     all_one += {1, 0, 0, 0, 0, 0, 0, 0};

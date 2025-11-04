@@ -13,18 +13,15 @@ class ZkLLMProofGenerator:
         self.model_size = model_size
         self.seq_len = seq_len
         self.workdir = workdir or f'./zkllm-workdir/Llama-2-{model_size}b'
-        self.total_layers = 32  # LLaMA-2 has 32 layers (0-31)
+        self.total_layers = 32 
         
-        # Create organized directory structure
         self.activation_dir = Path('./activations')
         self.temp_dir = Path('./temp-files')
         
-        # Ensure directories exist
         Path(self.workdir).mkdir(parents=True, exist_ok=True)
         self.activation_dir.mkdir(exist_ok=True)
         self.temp_dir.mkdir(exist_ok=True)
         
-        # Clean up any existing temp files
         self.cleanup_temp_files()
     
     def cleanup_temp_files(self):
