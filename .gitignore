@@ -1,27 +1,106 @@
-# Ignore everything by default
-*
+# ============================================# Ignore everything by default
 
-# --- Allowlist ---
+# zkLLM Project - FYP Git Repository*
 
-# Keep this .gitignore file
-!.gitignore
+# ============================================
 
-# Keep the original project README
-!README.md
+# This repository now contains:# Keep the .gitignore itself tracked
 
-# Allow the new activation capture files and directories
-!activation_capture_readme.md
-!capture_activations.py
+#   - zkllm-ccs2024/ (original implementation)!.gitignore
+
+#   - zkllm_v2/ (v2 with verification improvements)
+
+# ============================================# Allow activation capture README (case-insensitive safety)
+
+!ACTIVATION_CAPTURE_README.md
+
+# ===========================================!activation_capture_readme.md
+
+# LARGE FILES - DO NOT COMMIT
+
+# ===========================================# Allow the activation capture code directory and its Python files
+
 !activation_capture/
-!activations/
 
-# --- Original Project Files ---
-# Keep the core source and build files from the original project
-!*.cu
-!*.h
-!*.cuh
-!*.cpp
-!*.hpp
-!Makefile
-!CMakeLists.txt
-!*.py
+# Model Storage (HuggingFace models - VERY LARGE)!activation_capture/**
+
+model-storage/
+
+**/model-storage/# Allow the capture orchestration scripts (explicit)
+
+!capture_activations.py
+
+# Generated Proofs, Commitments, Public Parameters
+
+zkllm-workdir/# Allow the activations output directory (raw captured activations)
+
+**/zkllm-workdir/!activations/
+
+temp-files/!activations/**
+
+**/temp-files/
+
+# End - everything else will remain ignored to avoid including proprietary data
+
+# Activation Files (intermediate computations - keep directory structure)
+activations/*.bin
+**/activations/*.bin
+
+# ===========================================
+# COMPILED BINARIES
+# ===========================================
+*.o
+*.out
+*.a
+commit-param
+ppgen
+rmsnorm
+rmsnorm_v2
+self-attn
+skip-connection
+ffn
+main
+verify_rmsnorm_v2
+verify_rmsnorm_v2_real
+
+# ===========================================
+# PYTHON
+# ===========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ===========================================
+# IDE / EDITOR
+# ===========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===========================================
+# LOGS
+# ===========================================
+*.log
+
+# ===========================================
+# OS SPECIFIC
+# ===========================================
+.DS_Store
+Thumbs.db
+
+# ===========================================
+# KEEP DIRECTORY STRUCTURE
+# ===========================================
+# Allow empty .gitkeep files to preserve directory structure
+!.gitkeep
+

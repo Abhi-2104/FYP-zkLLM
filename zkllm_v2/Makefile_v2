@@ -1,0 +1,42 @@
+# Compilers
+NVCC := /home/abhi/miniconda3/envs/zkllm-env/bin/nvcc
+
+# Include and library paths
+INCLUDES := -I.
+LIBS := -L$(CONDA_PREFIX)/lib -lcudart -lstdc++
+
+# get compute capability from retrieved value
+ARCH := sm_86
+
+# NVCC compiler flags
+NVCC_FLAGS := -arch=$(ARCH) -std=c++17 --compiler-bindir=/usr/bin/gcc-12
+LD_FLAGS :=
+
+# --- V2 Object Files ---
+V2_CU_SRCS := bls12-381.cu ioutils.cu commitment_v2.cu fr-tensor.cu g1-tensor.cu timer.cpp proof_io_v2.cu proof_v2.cu zkfc_v2.cu rescaling_v2.cu zksoftmax.cu tlookup_v2.cu polynomial_v2.cu
+V2_OBJS := $(V2_CU_SRCS:.cu=.o)
+V2_OBJS := $(V2_OBJS:.cpp=.o)
+
+# --- Build Rules ---
+
+# Rule to compile .cu files into .o files
+%.o: %.cu
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -dc $< -o $@
+
+# Rule to compile .cpp files into .o files
+%.o: %.cpp
+	$(NVCC) -x cu $(NVCC_FLAGS) $(INCLUDES) -dc $< -o $@
+
+# --- V2 Targets ---
+rmsnorm_v2: rmsnorm_v2.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+verify_rmsnorm_v2: verify_rmsnorm_v2.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+verify_rmsnorm_v2_real: verify_rmsnorm_v2_real.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+# --- Clean Rule ---
+clean:
+	rm -f *.o rmsnorm_v2 verify_rmsnorm_v2 verify_rmsnorm_v2_real
