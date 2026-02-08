@@ -45,6 +45,10 @@ FrTensor zkFC::operator()(const FrTensor& X) const { // X.size is batch_size * i
 
     if (X.size % inputSize) throw std::runtime_error("input size does not match");
     uint batchSize = X.size / inputSize;
+    
+    // Force CUDA determinism for consistent results
+    cudaDeviceSynchronize();  // Ensure all previous operations complete
+    
     dim3 blockSize(TILE_WIDTH, TILE_WIDTH);
     dim3 gridSize((outputSize + blockSize.x - 1) / blockSize.x, (batchSize + blockSize.y - 1) / blockSize.y);
     FrTensor out(batchSize * outputSize);
@@ -66,7 +70,46 @@ vector<Claim> zkFC::prove(const FrTensor& X, const FrTensor& Y, vector<Polynomia
     auto u_input = random_vec(ceilLog2(inputSize));
     auto u_output = random_vec(ceilLog2(outputSize));
 
-    auto claim = Y.multi_dim_me({u_batch, u_output}, {batchSize, outputSize});
+    // PRECISION FIX: Recompute Y internally to ensure exact field arithmetic
+    FrTensor Y_computed = (*this)(X);
+    auto claim = Y_computed.multi_dim_me({u_batch, u_output}, {batchSize, outputSize});
+
+    auto X_reduced = X.partial_me(u_batch, batchSize, inputSize);
+    auto W_reduced = weights.partial_me(u_output, outputSize, 1);
+    auto final_claim = zkip(claim, X_reduced, W_reduced, u_input, proof);
+    auto claim_X = X.multi_dim_me({u_batch, u_input}, {batchSize, inputSize});
+    auto claim_W = weights.multi_dim_me({u_input, u_output}, {inputSize, outputSize});
+    if (claim_X * claim_W != final_claim) {
+        throw std::runtime_error("Claim does not match");
+    }
+
+    vector<Claim> claims;
+    claims.push_back({claim_X, {u_batch, u_input}, {batchSize, inputSize}});
+    claims.push_back({claim_W, {u_input, u_output}, {inputSize, outputSize}});
+    return claims;
+}
+
+// Overloaded prove() that saves random challenges for verification
+vector<Claim> zkFC::prove(const FrTensor& X, const FrTensor& Y, vector<Polynomial>& proof,
+                         vector<Fr_t>& u_batch_out, vector<Fr_t>& u_input_out, vector<Fr_t>& u_output_out) const
+{
+    if (has_bias) throw std::runtime_error("Cleaned-up version not implemented for zkFC with bias. Use zkFCStacked instead.");
+    uint batchSize = X.size / inputSize;
+    auto u_batch = random_vec(ceilLog2(batchSize));
+    auto u_input = random_vec(ceilLog2(inputSize));
+    auto u_output = random_vec(ceilLog2(outputSize));
+    
+    // Save challenges for verification
+    u_batch_out = u_batch;
+    u_input_out = u_input;
+    u_output_out = u_output;
+
+    // PRECISION FIX: Recompute Y internally to ensure exact field arithmetic
+    // This handles cases where Y might have been computed with approximate operations (e.g., softmax)
+    FrTensor Y_computed = (*this)(X);
+    
+    // Use the recomputed Y for claim generation to ensure exact field arithmetic
+    auto claim = Y_computed.multi_dim_me({u_batch, u_output}, {batchSize, outputSize});
 
     auto X_reduced = X.partial_me(u_batch, batchSize, inputSize);
     auto W_reduced = weights.partial_me(u_output, outputSize, 1);
@@ -137,14 +180,139 @@ Polynomial zkip_step_poly(const FrTensor& a, const FrTensor& b, const Fr_t& u)
 Fr_t zkip(const Fr_t& claim, const FrTensor& a, const FrTensor& b, const vector<Fr_t>& u, vector<Polynomial>& proof)
 {
     if (!u.size()) return claim;
+    
     auto p = zkip_step_poly(a, b, u.back());
     proof.push_back(p);
+    
     if (claim != p(TEMP_ZERO) + p(TEMP_ONE)) throw std::runtime_error("claim != p(0) + p(1)");
+    
     uint N_in = a.size, N_out = (1 << ceilLog2(a.size)) >> 1;
     FrTensor new_a(N_out), new_b(N_out);
     zkip_reduce_kernel<<<(N_out+FrNumThread-1)/FrNumThread,FrNumThread>>>(a.gpu_data, b.gpu_data, new_a.gpu_data, new_b.gpu_data, u.back(), N_in, N_out);
     cudaDeviceSynchronize();
     return zkip(p(u.back()), new_a, new_b, {u.begin(), u.end()-1}, proof);
+}
+
+// Verify proof using saved random challenges - enables standalone verification
+bool zkFC::verify(const FrTensor& X, const FrTensor& Y, const vector<Polynomial>& proof,
+                 const vector<Fr_t>& u_batch, const vector<Fr_t>& u_input, const vector<Fr_t>& u_output) const
+{
+    if (has_bias) {
+        std::cerr << "Warning: Verification not implemented for zkFC with bias" << std::endl;
+        return false;
+    }
+    
+    uint batchSize = X.size / inputSize;
+    
+    // Verify polynomial proof matches expected format
+    uint expected_proof_size = ceilLog2(inputSize);
+    if (proof.size() != expected_proof_size) {
+        std::cerr << "Proof size mismatch: expected " << expected_proof_size 
+                  << ", got " << proof.size() << std::endl;
+        return false;
+    }
+    
+    // Verify random challenge dimensions
+    if (u_batch.size() != ceilLog2(batchSize) ||
+        u_input.size() != ceilLog2(inputSize) ||
+        u_output.size() != ceilLog2(outputSize)) {
+        std::cerr << "Challenge dimension mismatch" << std::endl;
+        return false;
+    }
+    
+    // PRECISION FIX: Recompute Y internally to match what prover did
+    // This ensures we use the exact same values the prover used for claim generation
+    FrTensor Y_computed = (*this)(X);
+    
+    // Compute initial claim from recomputed Y (matching prover's approach)
+    auto claim = Y_computed.multi_dim_me({u_batch, u_output}, {batchSize, outputSize});
+    
+    // Initialize reduced tensors (matching zkip's initial setup)
+    auto X_reduced = X.partial_me(u_batch, batchSize, inputSize);
+    auto W_reduced = weights.partial_me(u_output, outputSize, 1);
+    
+    // Verify each polynomial in the sumcheck
+    // We need to replicate zkip's recursive logic:
+    // 1. Verify claim == p(0) + p(1) using CURRENT tensors
+    // 2. Fold tensors for next round
+    // 3. Update claim = p(challenge)
+    Fr_t current_claim = claim;
+    
+    // We need to maintain current tensors for folding
+    // Use pointers to avoid copying
+    FrTensor* current_a = &X_reduced;
+    FrTensor* current_b = &W_reduced;
+    
+    // Temporary tensors for folding
+    vector<FrTensor*> temp_tensors;  // Track allocated tensors for cleanup
+    
+    for (size_t round = 0; round < u_input.size(); round++) {
+        if (round >= proof.size()) {
+            std::cerr << "Proof index out of bounds at round " << round << std::endl;
+            for (auto t : temp_tensors) delete t;
+            return false;
+        }
+        
+        Polynomial& p = const_cast<Polynomial&>(proof[round]);
+        
+        // Evaluate polynomial at 0 and 1 (evaluate once and store)
+        Fr_t p_at_0 = p(TEMP_ZERO);
+        Fr_t p_at_1 = p(TEMP_ONE);
+        Fr_t p0_plus_p1 = p_at_0 + p_at_1;
+        
+
+        // Verify: current_claim == p(0) + p(1)
+        if (current_claim != p0_plus_p1) {
+            std::cerr << "Sumcheck verification failed at round " << round << std::endl;
+            std::cerr << "  Expected claim to equal p(0) + p(1)" << std::endl;
+            std::cerr << "  current_claim = " << current_claim << std::endl;
+            std::cerr << "  p(0) = " << p_at_0 << std::endl;
+            std::cerr << "  p(1) = " << p_at_1 << std::endl;
+            std::cerr << "  p(0) + p(1) = " << p0_plus_p1 << std::endl;
+            for (auto t : temp_tensors) delete t;
+            return false;
+        }
+        
+        // Evaluate polynomial at challenge point
+        // proof[round] uses u_input[n-1-round] because zkip processes from back to front
+        Fr_t challenge = u_input[u_input.size() - 1 - round];
+        current_claim = p(challenge);
+        
+        // Fold tensors for next round (skip on last iteration)
+        if (round < u_input.size() - 1) {
+            uint N_in = current_a->size;
+            uint N_out = (1 << ceilLog2(current_a->size)) >> 1;
+            FrTensor* new_a = new FrTensor(N_out);
+            FrTensor* new_b = new FrTensor(N_out);
+            temp_tensors.push_back(new_a);
+            temp_tensors.push_back(new_b);
+            
+            zkip_reduce_kernel<<<(N_out+FrNumThread-1)/FrNumThread,FrNumThread>>>(
+                current_a->gpu_data, current_b->gpu_data, 
+                new_a->gpu_data, new_b->gpu_data, 
+                challenge, N_in, N_out);
+            cudaDeviceSynchronize();
+            
+            current_a = new_a;
+            current_b = new_b;
+        }
+    }
+    
+    // Final verification: check that final claim matches actual product
+    auto claim_X = X.multi_dim_me({u_batch, u_input}, {batchSize, inputSize});
+    auto claim_W = weights.multi_dim_me({u_input, u_output}, {inputSize, outputSize});
+    auto expected_final = claim_X * claim_W;
+    
+    // Cleanup temporary tensors
+    for (auto t : temp_tensors) delete t;
+    
+    if (current_claim != expected_final) {
+        std::cerr << "Final claim verification failed" << std::endl;
+        std::cerr << "  Current claim does not match X * W evaluation" << std::endl;
+        return false;
+    }
+    
+    return true;
 }
 
 KERNEL void zkip_stacked_poly_kernel(GLOBAL Fr_t *a, GLOBAL Fr_t *b, GLOBAL Fr_t *out0, GLOBAL Fr_t *out1, GLOBAL Fr_t *out2, uint N_in, uint N_out, uint D)

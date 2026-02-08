@@ -190,7 +190,8 @@ int main(int argc, char *argv[])
             cout << "  ✅ Weight commitment verification PASSED!" << endl;
             cout << "     - Commitment opens correctly at random point" << endl;
             cout << "     - Proves knowledge of committed weights" << endl;
-            cout << "     - Binds proof to specific layer's parameter
+            cout << "     - Binds proof to specific layer's parameters" << endl;
+        } catch (const exception& e) {
             cout << "  ❌ Weight commitment verification FAILED!" << endl;
             cout << "     Error: " << e.what() << endl;
             cout << "\n     This means:" << endl;

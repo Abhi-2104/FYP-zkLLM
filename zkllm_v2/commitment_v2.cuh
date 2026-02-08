@@ -1,3 +1,4 @@
+
 #ifndef COMMITMENT_V2_CUH
 #define COMMITMENT_V2_CUH
 

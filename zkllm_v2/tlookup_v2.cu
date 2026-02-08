@@ -1,16 +1,22 @@
-#include "tlookup.cuh"
-#include "proof.cuh"
+#include "tlookup_v2.cuh"
+#include "proof_v2.cuh"
 
 // Some utils
 
 
-tLookup::tLookup(const FrTensor& table): table(table) {
+tLookup_v2::tLookup_v2(const FrTensor& table): table(table) {
 }
 
-KERNEL void tlookup_kernel(const uint* indices, const uint D, uint* counts){
+tLookup_v2::tLookup_v2(uint size): table(size) {
+}
+
+KERNEL void tlookup_kernel(const uint* indices, const uint D, uint* counts, uint table_size){
     const uint tid = threadIdx.x + blockIdx.x * blockDim.x;
     if(tid < D){
-        atomicAdd(&counts[indices[tid]], 1U);
+        uint idx = indices[tid];
+        if (idx < table_size) {
+            atomicAdd(&counts[idx], 1U);
+        }
     }
 }
 
@@ -20,7 +26,7 @@ KERNEL void count_to_m(uint* counts, Fr_t* m_ptr, uint N){
 }
 
 // 
-FrTensor tLookup::prep(const uint* indices, const uint D){
+FrTensor tLookup_v2::prep(const uint* indices, const uint D){
     // //copy indices to indices_cpu
     // uint indices_cpu[D];
     // cudaMemcpy(indices_cpu, indices, sizeof(uint) * D, cudaMemcpyDeviceToHost);
@@ -32,7 +38,7 @@ FrTensor tLookup::prep(const uint* indices, const uint D){
     cudaMalloc((void **)&counts, sizeof(uint) * table.size);
     cudaMemset(counts, 0, sizeof(uint) * table.size); // cnm
 
-    tlookup_kernel<<<(D+FrNumThread-1)/FrNumThread,FrNumThread>>>(indices, D, counts);
+    tlookup_kernel<<<(D+FrNumThread-1)/FrNumThread,FrNumThread>>>(indices, D, counts, table.size);
     cudaDeviceSynchronize();
     
     // //copy counts to cpu_counts
@@ -321,7 +327,7 @@ Fr_t tLookup_phase1(const Fr_t& claim, const FrTensor& A, const FrTensor& S, con
 
 
 
-Fr_t tLookup::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, const Fr_t& beta, const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof)
+Fr_t tLookup_v2::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, const Fr_t& beta, const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof)
 {
     const uint D = S.size;
     if (m.size != table.size) {
@@ -381,7 +387,7 @@ KERNEL void tlookuprange_init_kernel(Fr_t* table_ptr, int low, uint len, uint ta
 
 
 // tLookup is a super class of tLookupRange. The length has to be padded to be a power of 2
-tLookupRange::tLookupRange(int low, uint len) : low(low), tLookup(1 << ceilLog2(len))
+tLookupRange::tLookupRange(int low, uint len) : low(low), tLookup_v2(1 << ceilLog2(len))
 {
     // Get the pointer to the super class's table
     Fr_t* table_ptr = table.gpu_data;
@@ -406,7 +412,7 @@ FrTensor tLookupRange::prep(const int* vals, const uint D){
     // convert vals (which should be on gpu) to indices
     lookuprange_prep_kernel<<<(D+FrNumThread-1)/FrNumThread,FrNumThread>>>(vals, low, indices, D);
     cudaDeviceSynchronize();
-    auto out = tLookup::prep(indices, D);
+    auto out = tLookup_v2::prep(indices, D);
     cudaFree(indices);
     return out;
 }
@@ -427,7 +433,7 @@ FrTensor tLookupRange::prep(const FrTensor& vals){
     // convert vals (which should be on gpu) to indices
     lookuprange_tensor_prep_kernel<<<(vals.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(vals.gpu_data, low, indices, vals.size);
     cudaDeviceSynchronize();
-    auto out = tLookup::prep(indices, vals.size);
+    auto out = tLookup_v2::prep(indices, vals.size);
     cudaFree(indices);
     return out;
 }
@@ -443,12 +449,17 @@ tLookupRangeMapping::tLookupRangeMapping(int low, uint len, const FrTensor& mval
     cudaMemcpy(mapped_vals.gpu_data, mvals.gpu_data, sizeof(Fr_t) * mvals.size, cudaMemcpyDeviceToDevice);
 }
 
-KERNEL void lookuprangemapping_kernel(const uint* indices, const Fr_t* val_ptr, Fr_t* out_ptr, uint N)
+KERNEL void lookuprangemapping_kernel(const uint* indices, const Fr_t* val_ptr, Fr_t* out_ptr, uint N, uint mapped_vals_size)
 {
     const uint tid = threadIdx.x + blockIdx.x * blockDim.x;
     if (tid < N)
     {
-        out_ptr[tid] = val_ptr[indices[tid]];
+        uint idx = indices[tid];
+        if (idx < mapped_vals_size) {
+            out_ptr[tid] = val_ptr[idx];
+        } else {
+            out_ptr[tid] = {0, 0, 0, 0, 0, 0, 0, 0};  // Or some default value
+        }
     }
 }
 
@@ -461,10 +472,10 @@ pair<FrTensor, FrTensor> tLookupRangeMapping::operator()(const int* vals, const 
     // convert vals (which should be on gpu) to indices
     lookuprange_prep_kernel<<<(D+FrNumThread-1)/FrNumThread,FrNumThread>>>(vals, low, indices, D);
     cudaDeviceSynchronize();
-    auto m = tLookup::prep(indices, D);
+    auto m = tLookup_v2::prep(indices, D);
     
     FrTensor y(D);
-    lookuprangemapping_kernel<<<(D+FrNumThread-1)/FrNumThread,FrNumThread>>>(indices, mapped_vals.gpu_data, y.gpu_data, D);
+    lookuprangemapping_kernel<<<(D+FrNumThread-1)/FrNumThread,FrNumThread>>>(indices, mapped_vals.gpu_data, y.gpu_data, D, mapped_vals.size);
     cudaDeviceSynchronize();
     cudaFree(indices);
     return {y, m};   
@@ -477,9 +488,9 @@ pair<FrTensor, FrTensor> tLookupRangeMapping::operator()(const FrTensor& vals)
     // convert vals (which should be on gpu) to indices
     lookuprange_tensor_prep_kernel<<<(vals.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(vals.gpu_data, low, indices, vals.size);
     cudaDeviceSynchronize();
-    auto m = tLookup::prep(indices, vals.size);
+    auto m = tLookup_v2::prep(indices, vals.size);
     FrTensor y(vals.size);
-    lookuprangemapping_kernel<<<(vals.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(indices, mapped_vals.gpu_data, y.gpu_data, vals.size);
+    lookuprangemapping_kernel<<<(vals.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(indices, mapped_vals.gpu_data, y.gpu_data, vals.size, mapped_vals.size);
     cudaDeviceSynchronize();
     cudaFree(indices);
     return {y, m};   

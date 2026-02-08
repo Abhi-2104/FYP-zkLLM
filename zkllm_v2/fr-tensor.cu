@@ -158,6 +158,8 @@ KERNEL void Fr_broadcast_mul(GLOBAL Fr_t* arr, Fr_t x, GLOBAL Fr_t* arr_out, uin
 FrTensor::FrTensor(uint size): size(size), gpu_data(nullptr)
 {
     cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
+    // Initialize to zero to avoid uninitialized memory issues
+    cudaMemset(gpu_data, 0, sizeof(Fr_t) * size);
 }
 
 FrTensor::FrTensor(uint size, const Fr_t* cpu_data): size(size), gpu_data(nullptr)

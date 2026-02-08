@@ -26,6 +26,14 @@ public:
     // void prove(const FrTensor& X, const FrTensor& Z, Commitment& generators) const;
 
     vector<Claim> prove(const FrTensor& X, const FrTensor& Y, vector<Polynomial>& proof) const;
+    
+    // Overload that saves random challenges for verification
+    vector<Claim> prove(const FrTensor& X, const FrTensor& Y, vector<Polynomial>& proof,
+                       vector<Fr_t>& u_batch_out, vector<Fr_t>& u_input_out, vector<Fr_t>& u_output_out) const;
+    
+    // Verify proof using saved random challenges
+    bool verify(const FrTensor& X, const FrTensor& Y, const vector<Polynomial>& proof,
+               const vector<Fr_t>& u_batch, const vector<Fr_t>& u_input, const vector<Fr_t>& u_output) const;
 
     static zkFC from_float_gpu_ptr (uint input_size, uint output_size, unsigned long scaling_factor, float* weight_ptr, float* bias_ptr);
     static zkFC from_float_gpu_ptr (uint input_size, uint output_size, unsigned long scaling_factor, float* weight_ptr);
@@ -59,6 +67,9 @@ class zkFCStacked {
 Fr_t zkip(const Fr_t& claim, const FrTensor& a, const FrTensor& b, const vector<Fr_t>& u, vector<Polynomial>& proof);
 
 Fr_t zkip_stacked(const Fr_t& claim, const FrTensor& A, const FrTensor& B, const vector<Fr_t>& uN, const vector<Fr_t>& uD, const vector<Fr_t> vN, uint N, uint D, vector<Polynomial>& proof);
+
+// Kernel for folding tensors in zkip verification
+KERNEL void zkip_reduce_kernel(GLOBAL Fr_t *a, GLOBAL Fr_t *b, GLOBAL Fr_t *new_a, GLOBAL Fr_t *new_b, Fr_t v, uint N_in, uint N_out);
 
 
 #endif  // ZKFC_V2_CUH
