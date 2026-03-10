@@ -8,6 +8,8 @@
 
 # Keep the original project README
 !README.md
+!README_V2.md
+!verification_readme.md
 
 # Allow the new activation capture files and directories
 !activation_capture_readme.md
