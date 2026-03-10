@@ -18,25 +18,27 @@ class zkFC {
 public:
     const uint inputSize, outputSize;
     bool has_bias;
-    FrTensor weights, bias;
+    const FrTensor& weights;  // Reference to avoid copying 2.7GB per layer
+    FrTensor bias;
 
     zkFC(uint input_size, uint output_size, const FrTensor& weight);
-    zkFC(uint input_size, uint output_size, const FrTensor& weight, const FrTensor& bias);
+    zkFC(uint input_size, uint output_size, const FrTensor& weight, const FrTensor& bias_tensor);
     FrTensor operator()(const FrTensor& X) const;
     // void prove(const FrTensor& X, const FrTensor& Z, Commitment& generators) const;
 
     vector<Claim> prove(const FrTensor& X, const FrTensor& Y, vector<Polynomial>& proof) const;
     
-    // Overload that saves random challenges for verification
+    // Overload that saves random challenges, initial claim, and weight claim for verification
     vector<Claim> prove(const FrTensor& X, const FrTensor& Y, vector<Polynomial>& proof,
-                       vector<Fr_t>& u_batch_out, vector<Fr_t>& u_input_out, vector<Fr_t>& u_output_out) const;
+                       vector<Fr_t>& u_batch_out, vector<Fr_t>& u_input_out, vector<Fr_t>& u_output_out,
+                       Fr_t& initial_claim_out, Fr_t& claim_W_out) const;
     
-    // Verify proof using saved random challenges
-    bool verify(const FrTensor& X, const FrTensor& Y, const vector<Polynomial>& proof,
-               const vector<Fr_t>& u_batch, const vector<Fr_t>& u_input, const vector<Fr_t>& u_output) const;
+    // Verify proof using saved random challenges, initial claim, and claim_W
+    bool verify(const vector<Polynomial>& proof,
+               const vector<Fr_t>& u_batch, const vector<Fr_t>& u_input, const vector<Fr_t>& u_output,
+               const Fr_t& initial_claim, const Fr_t& claim_W_from_proof) const;
 
-    static zkFC from_float_gpu_ptr (uint input_size, uint output_size, unsigned long scaling_factor, float* weight_ptr, float* bias_ptr);
-    static zkFC from_float_gpu_ptr (uint input_size, uint output_size, unsigned long scaling_factor, float* weight_ptr);
+    // NOTE: from_float_gpu_ptr functions removed - incompatible with reference-based weight storage
     static FrTensor load_float_gpu_input(uint batch_size, uint input_size, unsigned long scaling_factor, float* input_ptr);
 
     // void attention(FrTensor &V, FrTensor &K, FrTensor &Q, FrTensor &out, uint rowsV, uint colsV, uint rowsK, uint colsK, uint rowsQ, uint colsQ);

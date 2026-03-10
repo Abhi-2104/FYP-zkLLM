@@ -9,6 +9,8 @@ parser.add_argument('layer', type=int, help='The layer to use for self-attn')
 parser.add_argument('seq_len', type=int, help='The sequence length to use for self-attn')
 parser.add_argument('--input_file', required = True, type=str, help='The input file to use for self-attn (output from input rmsnorm)')
 parser.add_argument('--output_file', default = 'llama-self-attn-output.bin', type=str, help='The output file to use for self-attn')
+parser.add_argument('--precomputed', action='store_true', help='Use precomputed parameters (skip model loading)')
+parser.add_argument('--embed_dim', type=int, default=None, help='Embedding dimension (required with --precomputed)')
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import fileio_utils
@@ -21,11 +23,15 @@ if __name__ == '__main__':
         exit(1)
     
     args = parser.parse_args()
-    model_card = f"meta-llama/Llama-2-{args.model_size}b-hf"
 
-    model = AutoModelForCausalLM.from_pretrained(model_card, local_files_only = True, cache_dir = "./model-storage")
-    layer = model.model.layers[args.layer].self_attn
-    embed_dim = layer.q_proj.in_features
+    if args.precomputed:
+        embed_dim = args.embed_dim
+    else:
+        model_card = f"meta-llama/Llama-2-{args.model_size}b-hf"
+        model = AutoModelForCausalLM.from_pretrained(model_card, local_files_only = True, cache_dir = "./model-storage")
+        layer = model.model.layers[args.layer].self_attn
+        embed_dim = layer.q_proj.in_features
+        del model
     
     # Verify input file exists
     if not os.path.isfile(args.input_file):

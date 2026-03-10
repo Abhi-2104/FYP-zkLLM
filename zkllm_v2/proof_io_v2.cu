@@ -228,6 +228,17 @@ void save_self_attn_proof(const SelfAttnProof& proof, const std::string& filenam
     out.write(reinterpret_cast<const char*>(&o_u_output_size), sizeof(uint64_t));
     out.write(reinterpret_cast<const char*>(proof.o_u_output.data()), o_u_output_size * sizeof(Fr_t));
 
+    // Save initial claims and weight claims for Q, K, V, O projections
+    out.write(reinterpret_cast<const char*>(&proof.q_claim), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.k_claim), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.v_claim), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.o_claim), sizeof(Fr_t));
+    
+    out.write(reinterpret_cast<const char*>(&proof.q_claim_W), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.k_claim_W), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.v_claim_W), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.o_claim_W), sizeof(Fr_t));
+
     // Save Q @ K^T (scores) random challenges
     uint64_t s_u_batch_size = proof.s_u_batch.size();
     out.write(reinterpret_cast<const char*>(&s_u_batch_size), sizeof(uint64_t));
@@ -361,6 +372,17 @@ SelfAttnProof load_self_attn_proof(const std::string& filename) {
     proof.o_u_output.resize(o_u_output_size);
     in.read(reinterpret_cast<char*>(proof.o_u_output.data()), o_u_output_size * sizeof(Fr_t));
 
+    // Load initial claims and weight claims for Q, K, V, O projections
+    in.read(reinterpret_cast<char*>(&proof.q_claim), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.k_claim), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.v_claim), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.o_claim), sizeof(Fr_t));
+    
+    in.read(reinterpret_cast<char*>(&proof.q_claim_W), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.k_claim_W), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.v_claim_W), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.o_claim_W), sizeof(Fr_t));
+
     // Load Q @ K^T (scores) random challenges
     uint64_t s_u_batch_size;
     in.read(reinterpret_cast<char*>(&s_u_batch_size), sizeof(uint64_t));
@@ -414,3 +436,260 @@ SelfAttnProof load_self_attn_proof(const std::string& filename) {
     in.close();
     return proof;
 }
+
+// Saves a complete FFN proof to a binary file
+void save_ffn_proof(const FFNProof& proof, const std::string& filename) {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) {
+        std::cerr << "Failed to open file for writing: " << filename << std::endl;
+        return;
+    }
+
+    // Dimensions
+    out.write(reinterpret_cast<const char*>(&proof.seq_len), sizeof(int));
+    out.write(reinterpret_cast<const char*>(&proof.embed_dim), sizeof(int));
+    out.write(reinterpret_cast<const char*>(&proof.hidden_dim), sizeof(int));
+
+    // Save polynomial proof vectors
+    save_proof(proof.up_proj_proof, out);
+    save_proof(proof.gate_proj_proof, out);
+    save_proof(proof.down_proj_proof, out);
+    save_proof(proof.swiglu_proof, out);
+
+    // Save Up projection random challenges
+    uint64_t up_u_batch_size = proof.up_u_batch.size();
+    out.write(reinterpret_cast<const char*>(&up_u_batch_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.up_u_batch.data()), up_u_batch_size * sizeof(Fr_t));
+    
+    uint64_t up_u_input_size = proof.up_u_input.size();
+    out.write(reinterpret_cast<const char*>(&up_u_input_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.up_u_input.data()), up_u_input_size * sizeof(Fr_t));
+    
+    uint64_t up_u_output_size = proof.up_u_output.size();
+    out.write(reinterpret_cast<const char*>(&up_u_output_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.up_u_output.data()), up_u_output_size * sizeof(Fr_t));
+
+    // Save Gate projection random challenges
+    uint64_t gate_u_batch_size = proof.gate_u_batch.size();
+    out.write(reinterpret_cast<const char*>(&gate_u_batch_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.gate_u_batch.data()), gate_u_batch_size * sizeof(Fr_t));
+    
+    uint64_t gate_u_input_size = proof.gate_u_input.size();
+    out.write(reinterpret_cast<const char*>(&gate_u_input_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.gate_u_input.data()), gate_u_input_size * sizeof(Fr_t));
+    
+    uint64_t gate_u_output_size = proof.gate_u_output.size();
+    out.write(reinterpret_cast<const char*>(&gate_u_output_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.gate_u_output.data()), gate_u_output_size * sizeof(Fr_t));
+
+    // Save Down projection random challenges
+    uint64_t down_u_batch_size = proof.down_u_batch.size();
+    out.write(reinterpret_cast<const char*>(&down_u_batch_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.down_u_batch.data()), down_u_batch_size * sizeof(Fr_t));
+    
+    uint64_t down_u_input_size = proof.down_u_input.size();
+    out.write(reinterpret_cast<const char*>(&down_u_input_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.down_u_input.data()), down_u_input_size * sizeof(Fr_t));
+    
+    uint64_t down_u_output_size = proof.down_u_output.size();
+    out.write(reinterpret_cast<const char*>(&down_u_output_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.down_u_output.data()), down_u_output_size * sizeof(Fr_t));
+
+    // Save initial claims (verifier uses these instead of recomputing)
+    out.write(reinterpret_cast<const char*>(&proof.up_claim), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.gate_claim), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.down_claim), sizeof(Fr_t));
+
+    // Save weight claims (for cross-verification)
+    out.write(reinterpret_cast<const char*>(&proof.up_claim_W), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.gate_claim_W), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.down_claim_W), sizeof(Fr_t));
+
+    // Save SwiGLU random challenges
+    uint64_t swiglu_u_size = proof.swiglu_u.size();
+    out.write(reinterpret_cast<const char*>(&swiglu_u_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.swiglu_u.data()), swiglu_u_size * sizeof(Fr_t));
+    
+    uint64_t swiglu_v_size = proof.swiglu_v.size();
+    out.write(reinterpret_cast<const char*>(&swiglu_v_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.swiglu_v.data()), swiglu_v_size * sizeof(Fr_t));
+    
+    out.write(reinterpret_cast<const char*>(&proof.swiglu_r), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.swiglu_alpha), sizeof(Fr_t));
+    out.write(reinterpret_cast<const char*>(&proof.swiglu_beta), sizeof(Fr_t));
+
+    // Claimed output random challenges
+    uint64_t claimed_output_u_size = proof.claimed_output_u.size();
+    out.write(reinterpret_cast<const char*>(&claimed_output_u_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.claimed_output_u.data()), claimed_output_u_size * sizeof(Fr_t));
+
+    // Claimed output
+    out.write(reinterpret_cast<const char*>(&proof.claimed_output), sizeof(Fr_t));
+
+    out.close();
+}
+
+// Loads a complete FFN proof from a binary file
+FFNProof load_ffn_proof(const std::string& filename) {
+    FFNProof proof;
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) {
+        std::cerr << "Failed to open file for reading: " << filename << std::endl;
+        exit(1);
+    }
+
+    // Dimensions
+    in.read(reinterpret_cast<char*>(&proof.seq_len), sizeof(int));
+    in.read(reinterpret_cast<char*>(&proof.embed_dim), sizeof(int));
+    in.read(reinterpret_cast<char*>(&proof.hidden_dim), sizeof(int));
+
+    // Load polynomial proof vectors
+    proof.up_proj_proof = load_proof(in);
+    proof.gate_proj_proof = load_proof(in);
+    proof.down_proj_proof = load_proof(in);
+    proof.swiglu_proof = load_proof(in);
+
+    // Load Up projection random challenges
+    uint64_t up_u_batch_size;
+    in.read(reinterpret_cast<char*>(&up_u_batch_size), sizeof(uint64_t));
+    proof.up_u_batch.resize(up_u_batch_size);
+    in.read(reinterpret_cast<char*>(proof.up_u_batch.data()), up_u_batch_size * sizeof(Fr_t));
+    
+    uint64_t up_u_input_size;
+    in.read(reinterpret_cast<char*>(&up_u_input_size), sizeof(uint64_t));
+    proof.up_u_input.resize(up_u_input_size);
+    in.read(reinterpret_cast<char*>(proof.up_u_input.data()), up_u_input_size * sizeof(Fr_t));
+    
+    uint64_t up_u_output_size;
+    in.read(reinterpret_cast<char*>(&up_u_output_size), sizeof(uint64_t));
+    proof.up_u_output.resize(up_u_output_size);
+    in.read(reinterpret_cast<char*>(proof.up_u_output.data()), up_u_output_size * sizeof(Fr_t));
+
+    // Load Gate projection random challenges
+    uint64_t gate_u_batch_size;
+    in.read(reinterpret_cast<char*>(&gate_u_batch_size), sizeof(uint64_t));
+    proof.gate_u_batch.resize(gate_u_batch_size);
+    in.read(reinterpret_cast<char*>(proof.gate_u_batch.data()), gate_u_batch_size * sizeof(Fr_t));
+    
+    uint64_t gate_u_input_size;
+    in.read(reinterpret_cast<char*>(&gate_u_input_size), sizeof(uint64_t));
+    proof.gate_u_input.resize(gate_u_input_size);
+    in.read(reinterpret_cast<char*>(proof.gate_u_input.data()), gate_u_input_size * sizeof(Fr_t));
+    
+    uint64_t gate_u_output_size;
+    in.read(reinterpret_cast<char*>(&gate_u_output_size), sizeof(uint64_t));
+    proof.gate_u_output.resize(gate_u_output_size);
+    in.read(reinterpret_cast<char*>(proof.gate_u_output.data()), gate_u_output_size * sizeof(Fr_t));
+
+    // Load Down projection random challenges
+    uint64_t down_u_batch_size;
+    in.read(reinterpret_cast<char*>(&down_u_batch_size), sizeof(uint64_t));
+    proof.down_u_batch.resize(down_u_batch_size);
+    in.read(reinterpret_cast<char*>(proof.down_u_batch.data()), down_u_batch_size * sizeof(Fr_t));
+    
+    uint64_t down_u_input_size;
+    in.read(reinterpret_cast<char*>(&down_u_input_size), sizeof(uint64_t));
+    proof.down_u_input.resize(down_u_input_size);
+    in.read(reinterpret_cast<char*>(proof.down_u_input.data()), down_u_input_size * sizeof(Fr_t));
+    
+    uint64_t down_u_output_size;
+    in.read(reinterpret_cast<char*>(&down_u_output_size), sizeof(uint64_t));
+    proof.down_u_output.resize(down_u_output_size);
+    in.read(reinterpret_cast<char*>(proof.down_u_output.data()), down_u_output_size * sizeof(Fr_t));
+
+    // Load initial claims (verifier uses these instead of recomputing)
+    in.read(reinterpret_cast<char*>(&proof.up_claim), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.gate_claim), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.down_claim), sizeof(Fr_t));
+
+    // Load weight claims (for cross-verification)
+    in.read(reinterpret_cast<char*>(&proof.up_claim_W), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.gate_claim_W), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.down_claim_W), sizeof(Fr_t));
+
+    // Load SwiGLU random challenges
+    uint64_t swiglu_u_size;
+    in.read(reinterpret_cast<char*>(&swiglu_u_size), sizeof(uint64_t));
+    proof.swiglu_u.resize(swiglu_u_size);
+    in.read(reinterpret_cast<char*>(proof.swiglu_u.data()), swiglu_u_size * sizeof(Fr_t));
+    
+    uint64_t swiglu_v_size;
+    in.read(reinterpret_cast<char*>(&swiglu_v_size), sizeof(uint64_t));
+    proof.swiglu_v.resize(swiglu_v_size);
+    in.read(reinterpret_cast<char*>(proof.swiglu_v.data()), swiglu_v_size * sizeof(Fr_t));
+    
+    in.read(reinterpret_cast<char*>(&proof.swiglu_r), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.swiglu_alpha), sizeof(Fr_t));
+    in.read(reinterpret_cast<char*>(&proof.swiglu_beta), sizeof(Fr_t));
+
+    // Claimed output random challenges
+    uint64_t claimed_output_u_size;
+    in.read(reinterpret_cast<char*>(&claimed_output_u_size), sizeof(uint64_t));
+    proof.claimed_output_u.resize(claimed_output_u_size);
+    in.read(reinterpret_cast<char*>(proof.claimed_output_u.data()), claimed_output_u_size * sizeof(Fr_t));
+
+    // Claimed output
+    in.read(reinterpret_cast<char*>(&proof.claimed_output), sizeof(Fr_t));
+
+    in.close();
+    return proof;
+}
+
+// Saves a complete Skip Connection proof to a binary file
+void save_skip_connection_proof(const SkipConnectionProof& proof, const std::string& filename) {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) {
+        std::cerr << "Failed to open file for writing: " << filename << std::endl;
+        return;
+    }
+
+    // Tensor size
+    out.write(reinterpret_cast<const char*>(&proof.tensor_size), sizeof(int));
+
+    // Save hadamard sum proof (Fr_t vector)
+    uint64_t proof_size = proof.hadamard_sum_proof.size();
+    out.write(reinterpret_cast<const char*>(&proof_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.hadamard_sum_proof.data()), proof_size * sizeof(Fr_t));
+
+    // Save random challenges
+    uint64_t u_size = proof.random_u.size();
+    out.write(reinterpret_cast<const char*>(&u_size), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(proof.random_u.data()), u_size * sizeof(Fr_t));
+
+    // Save claimed output
+    out.write(reinterpret_cast<const char*>(&proof.claimed_output), sizeof(Fr_t));
+
+    out.close();
+}
+
+// Loads a complete Skip Connection proof from a binary file
+SkipConnectionProof load_skip_connection_proof(const std::string& filename) {
+    SkipConnectionProof proof;
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) {
+        std::cerr << "Failed to open file for reading: " << filename << std::endl;
+        exit(1);
+    }
+
+    // Tensor size
+    in.read(reinterpret_cast<char*>(&proof.tensor_size), sizeof(int));
+
+    // Load hadamard sum proof
+    uint64_t proof_size;
+    in.read(reinterpret_cast<char*>(&proof_size), sizeof(uint64_t));
+    proof.hadamard_sum_proof.resize(proof_size);
+    in.read(reinterpret_cast<char*>(proof.hadamard_sum_proof.data()), proof_size * sizeof(Fr_t));
+
+    // Load random challenges
+    uint64_t u_size;
+    in.read(reinterpret_cast<char*>(&u_size), sizeof(uint64_t));
+    proof.random_u.resize(u_size);
+    in.read(reinterpret_cast<char*>(proof.random_u.data()), u_size * sizeof(Fr_t));
+
+    // Load claimed output
+    in.read(reinterpret_cast<char*>(&proof.claimed_output), sizeof(Fr_t));
+
+    in.close();
+    return proof;
+}
+

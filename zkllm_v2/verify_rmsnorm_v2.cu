@@ -86,46 +86,55 @@ int main(int argc, char *argv[])
             FrTensor X = FrTensor::from_int_bin(input_activation_file);
             cout << "  ✓ Input activations loaded (" << X.size << " elements)" << endl;
             
-            // Load rms_inv_temp (need this for forward pass)
-            // For standalone verification, we compute it ourselves
             cout << "  Computing RMS normalization..." << endl;
             
-            // This is a limitation - we need rms_inv which was computed by prover
-            // For demo, we'll check if it exists
-            try {
-                FrTensor rms_inv_temp = FrTensor::from_int_bin("rms_inv_temp.bin");
-                cout << "  ✓ RMS inverse loaded from temp file" << endl;
+            // Derive per-layer rms_inv path from workdir + layer_prefix + which.
+            // e.g. zkllm-workdir/Llama-2-7b/layer-0-input-rms_inv.bin
+            //      zkllm-workdir/Llama-2-7b/layer-0-post_attention-rms_inv.bin
+            string rms_inv_file = workdir + "/" + layer_prefix + "-" + which + "-rms_inv.bin";
             
+            FrTensor* rms_inv_temp_ptr = nullptr;
+            try {
+                rms_inv_temp_ptr = new FrTensor(FrTensor::from_int_bin(rms_inv_file));
+                cout << "  ✓ RMS inverse loaded from: " << rms_inv_file << endl;
+            } catch (const exception& inner_e) {
+                // Fallback: try legacy shared file for backwards compatibility
+                try {
+                    rms_inv_temp_ptr = new FrTensor(FrTensor::from_int_bin("rms_inv_temp.bin"));
+                    cout << "  ✓ RMS inverse loaded from legacy rms_inv_temp.bin" << endl;
+                    cout << "    ⚠ (Regenerate proofs to use per-layer files)" << endl;
+                } catch (...) {
+                    cout << "  ⚠️  rms_inv not found at '" << rms_inv_file
+                         << "' or 'rms_inv_temp.bin' — skipping claimed output check." << endl;
+                }
+            }
+            
+            if (rms_inv_temp_ptr != nullptr) {
+                FrTensor& rms_inv_temp = *rms_inv_temp_ptr;
+                
                 // Recompute forward pass with loaded commitment
                 cout << "  Recomputing forward pass with loaded commitment..." << endl;
-                
                 uint embed_dim = 4096;
                 Rescaling rs1(1 << 16);
                 zkFC g = zkFC(1, embed_dim, rmsnorm_weight.weight);
                 auto g_inv_rms = g(rms_inv_temp);
                 auto g_inv_rms_ = rs1(g_inv_rms);
-                
                 cout << "  ✓ Forward pass recomputed" << endl;
                 
-                // Evaluate at random points
+                // Evaluate at random challenges to verify claimed output
                 cout << "\n  >>> CRYPTOGRAPHIC CLAIMED OUTPUT CHECK <<<" << endl;
-                cout << "  Evaluating g_inv_rms_(u) * X(v) at random challenges..." << endl;
+                cout << "  Evaluating g_inv_rms_(u) * X(u) at random challenges..." << endl;
                 
-                Fr_t computed_claim_left = g_inv_rms_(proof.random_u);
-                Fr_t computed_claim_right = X(proof.random_v);
-                Fr_t computed_claim = computed_claim_left * computed_claim_right;
+                Fr_t computed_claim = g_inv_rms_(proof.random_u) * X(proof.random_u);
                 
-                // Print first 4 limbs (128 bits) in hex for comparison
                 cout << "  Computed claim: 0x";
-                for (int i = 3; i >= 0; i--) {
+                for (int i = 3; i >= 0; i--)
                     cout << hex << setw(8) << setfill('0') << computed_claim.val[i];
-                }
                 cout << "..." << dec << endl;
                 
                 cout << "  Proof claim:    0x";
-                for (int i = 3; i >= 0; i--) {
+                for (int i = 3; i >= 0; i--)
                     cout << hex << setw(8) << setfill('0') << proof.claimed_output.val[i];
-                }
                 cout << "..." << dec << endl;
                 
                 if (computed_claim == proof.claimed_output) {
@@ -139,13 +148,12 @@ int main(int argc, char *argv[])
                     cout << "     - Proof was NOT generated with this commitment" << endl;
                     cout << "     - Either wrong layer or malicious proof" << endl;
                     cout << "     - CRYPTOGRAPHIC BINDING CHECK FAILED" << endl;
+                    delete rms_inv_temp_ptr;
                     cerr << "\n✗ VERIFICATION FAILED: Claimed output mismatch" << endl;
                     return 1;
                 }
                 
-            } catch (const exception& e) {
-                cout << "  ⚠️  Could not load rms_inv_temp.bin: " << e.what() << endl;
-                cout << "     (Skipping claimed output verification)" << endl;
+                delete rms_inv_temp_ptr;
             }
         } catch (const exception& e) {
             cout << "  ⚠️  Could not load input activations: " << e.what() << endl;
@@ -185,7 +193,7 @@ int main(int argc, char *argv[])
         if (claimed_output_verified) {
             cout << "     - Claimed output cryptographically verified ✅" << endl;
         } else {
-            cout << "     - ⚠️  Claimed output not verified (missing rms_inv_temp.bin)" << endl;
+            cout << "     - ⚠️  Claimed output not verified (missing rms_inv file)" << endl;
         }
         
     } else {

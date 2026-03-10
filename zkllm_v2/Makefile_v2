@@ -44,6 +44,25 @@ self-attn_v2: self-attn_v2.o $(V2_OBJS)
 verify_self-attn_v2: verify_self-attn_v2.o $(V2_OBJS)
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LD_FLAGS) $(LIBS)
 
+ffn_v2: ffn_v2.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+verify_ffn_v2: verify_ffn_v2.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+skip-connection_v2: skip-connection_v2.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+verify_skip-connection_v2: verify_skip-connection_v2.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+# --- Demo Targets (show old buggy code for presentation) ---
+ffn_v2_demo: ffn_v2_demo.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+verify_ffn_v2_demo: verify_ffn_v2_demo.cu $(V2_OBJS)
+	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
 # --- Clean Rule ---
 clean:
-	rm -f *.o rmsnorm_v2 verify_rmsnorm_v2 verify_rmsnorm_v2_real self-attn_v2 verify_self-attn_v2
+	rm -f *.o rmsnorm_v2 verify_rmsnorm_v2 verify_rmsnorm_v2_real self-attn_v2 verify_self-attn_v2 ffn_v2 verify_ffn_v2 skip-connection_v2 verify_skip-connection_v2 ffn_v2_demo verify_ffn_v2_demo

@@ -174,10 +174,36 @@ FrTensor::FrTensor(const FrTensor& t): size(t.size), gpu_data(nullptr)
     cudaMemcpy(gpu_data, t.gpu_data, sizeof(Fr_t) * size, cudaMemcpyDeviceToDevice);
 }
 
+// Move constructor - takes ownership without copying
+FrTensor::FrTensor(FrTensor&& t) noexcept : size(t.size), gpu_data(t.gpu_data)
+{
+    // Take ownership of the GPU memory - set source pointer to null
+    t.gpu_data = nullptr;
+}
+
+// Move assignment operator
+FrTensor& FrTensor::operator=(FrTensor&& t) noexcept
+{
+    if (this != &t) {
+        // Free existing GPU memory
+        if (gpu_data) {
+            cudaFree(gpu_data);
+        }
+        // Take ownership of the source's GPU memory
+        // Note: size is const, can't change it - but we need to handle this
+        const_cast<uint&>(size) = t.size;
+        gpu_data = t.gpu_data;
+        t.gpu_data = nullptr;
+    }
+    return *this;
+}
+
 FrTensor::~FrTensor()
 {
-    cudaFree(gpu_data);
-    gpu_data = nullptr;
+    if (gpu_data) {
+        cudaFree(gpu_data);
+        gpu_data = nullptr;
+    }
 }
 
 void FrTensor::save(const string& filename) const
@@ -544,14 +570,33 @@ KERNEL void Fr_multi_dim_partial_me_step(GLOBAL Fr_t* arr_in, GLOBAL Fr_t *arr_o
 FrTensor Fr_partial_me(const FrTensor& t, vector<Fr_t>::const_iterator begin, vector<Fr_t>::const_iterator end, uint cur_dim, uint window_size)
 {
     if (begin >= end) return t;
-    if (t.size % (cur_dim * window_size) != 0) throw std::runtime_error("t.size % (cur_dim * window_size) != 0");
-    uint cur_dim_out = (cur_dim + 1) / 2;
-    uint other_dims = t.size / (cur_dim * window_size);
-    uint out_size = other_dims * cur_dim_out * window_size;
-    FrTensor t_new(out_size);
-    Fr_multi_dim_partial_me_step<<<(t_new.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(t.gpu_data, t_new.gpu_data, *begin, other_dims, cur_dim, cur_dim_out, window_size);
-    cudaDeviceSynchronize();
-    return Fr_partial_me(t_new, begin + 1, end, cur_dim_out, window_size);
+    
+    bool using_original = true;
+    FrTensor current_wrapper(0);
+    const FrTensor* current_t = &t;
+    uint current_dim = cur_dim;
+    
+    auto it = begin;
+    while (it != end) {
+        if (current_t->size % (current_dim * window_size) != 0) throw std::runtime_error("t.size % (current_dim * window_size) != 0");
+        uint cur_dim_out = (current_dim + 1) / 2;
+        uint other_dims = current_t->size / (current_dim * window_size);
+        uint out_size = other_dims * cur_dim_out * window_size;
+        
+        FrTensor t_new(out_size);
+        Fr_multi_dim_partial_me_step<<<(t_new.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(current_t->gpu_data, t_new.gpu_data, *it, other_dims, current_dim, cur_dim_out, window_size);
+        cudaDeviceSynchronize();
+        
+        current_wrapper = std::move(t_new);
+        current_t = &current_wrapper;
+        using_original = false;
+        current_dim = cur_dim_out;
+        
+        ++it;
+    }
+    
+    if (using_original) return t;
+    return std::move(current_wrapper);
 }
 
 FrTensor FrTensor::partial_me(const vector<Fr_t>& u, uint cur_dim, uint window_size) const
@@ -603,11 +648,26 @@ KERNEL void Fr_me_step(GLOBAL Fr_t *arr_in, GLOBAL Fr_t *arr_out, Fr_t x, uint i
 
 Fr_t Fr_me(const FrTensor& t, vector<Fr_t>::const_iterator begin, vector<Fr_t>::const_iterator end)
 {
-    FrTensor t_new((t.size + 1) / 2);
     if (begin >= end) return t(0);
-    Fr_me_step<<<(t_new.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(t.gpu_data, t_new.gpu_data, *begin, t.size, t_new.size);
-    cudaDeviceSynchronize();
-    return Fr_me(t_new, begin + 1, end);
+    
+    bool using_original = true;
+    FrTensor current_wrapper(0);
+    const FrTensor* current_t = &t;
+    
+    auto it = begin;
+    while (it != end) {
+        FrTensor t_new((current_t->size + 1) / 2);
+        Fr_me_step<<<(t_new.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(current_t->gpu_data, t_new.gpu_data, *it, current_t->size, t_new.size);
+        cudaDeviceSynchronize();
+        
+        current_wrapper = std::move(t_new);
+        current_t = &current_wrapper;
+        using_original = false;
+        
+        ++it;
+    }
+    
+    return current_t->operator()(0);
 }
 
 // ALERT: CONVERTED TO WORK FOR NON-MONTGOMERY FORM
@@ -634,12 +694,29 @@ KERNEL void Fr_partial_me_step(GLOBAL Fr_t *arr_in, GLOBAL Fr_t *arr_out, Fr_t x
 FrTensor Fr_partial_me(const FrTensor& t, vector<Fr_t>::const_iterator begin, vector<Fr_t>::const_iterator end, uint window_size)
 {
     if (begin >= end) return t;
-    uint num_windows = (t.size + 2 * window_size - 1) / (2 * window_size);
-    uint out_size = window_size * num_windows;
-    FrTensor t_new(out_size);
-    Fr_partial_me_step<<<(t_new.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(t.gpu_data, t_new.gpu_data, *begin, t.size, t_new.size, window_size);
-    cudaDeviceSynchronize();
-    return Fr_partial_me(t_new, begin + 1, end, window_size);
+    
+    bool using_original = true;
+    FrTensor current_wrapper(0);
+    const FrTensor* current_t = &t;
+    
+    auto it = begin;
+    while (it != end) {
+        uint num_windows = (current_t->size + 2 * window_size - 1) / (2 * window_size);
+        uint out_size = window_size * num_windows;
+        
+        FrTensor t_new(out_size);
+        Fr_partial_me_step<<<(t_new.size+FrNumThread-1)/FrNumThread,FrNumThread>>>(current_t->gpu_data, t_new.gpu_data, *it, current_t->size, t_new.size, window_size);
+        cudaDeviceSynchronize();
+        
+        current_wrapper = std::move(t_new);
+        current_t = &current_wrapper;
+        using_original = false;
+        
+        ++it;
+    }
+    
+    if (using_original) return t;
+    return std::move(current_wrapper);
 }
 
 Fr_t FrTensor::multi_dim_me(const vector<vector<Fr_t>>& us, const vector<uint>& shape) const
@@ -648,7 +725,40 @@ Fr_t FrTensor::multi_dim_me(const vector<vector<Fr_t>>& us, const vector<uint>& 
     if (shape.size() == 0) return (*this)(0);
     else if (shape.size() == 1) return (*this)(us[0]);
     else {
+        // DEBUG: Print tensor info before partial_me
+        std::cerr << "DEBUG multi_dim_me: shape.size()=" << shape.size() 
+                  << ", us.back().size()=" << us.back().size()
+                  << ", shape.back()=" << shape.back()
+                  << ", this->size=" << size 
+                  << ", this->gpu_data=" << (void*)gpu_data << std::endl;
+        
+        // Check for null pointer
+        if (gpu_data == nullptr) {
+            std::cerr << "ERROR: gpu_data is null in multi_dim_me!" << std::endl;
+            throw std::runtime_error("gpu_data is null in multi_dim_me");
+        }
+        
+        // Print first element before partial_me
+        Fr_t first;
+        cudaMemcpy(&first, gpu_data, sizeof(Fr_t), cudaMemcpyDeviceToHost);
+        std::cerr << "DEBUG multi_dim_me: first element = " << first << std::endl;
+        
         FrTensor t_new = this -> partial_me(us.back(), shape.back(), 1);
+        
+        // DEBUG: Print after partial_me
+        std::cerr << "DEBUG multi_dim_me: after partial_me, t_new.size=" << t_new.size 
+                  << ", t_new.gpu_data=" << (void*)t_new.gpu_data << std::endl;
+        
+        if (t_new.gpu_data == nullptr) {
+            std::cerr << "ERROR: t_new.gpu_data is null after partial_me!" << std::endl;
+            throw std::runtime_error("t_new.gpu_data is null after partial_me");
+        }
+        
+        // Print first element of t_new
+        Fr_t first_new;
+        cudaMemcpy(&first_new, t_new.gpu_data, sizeof(Fr_t), cudaMemcpyDeviceToHost);
+        std::cerr << "DEBUG multi_dim_me: t_new first element = " << first_new << std::endl;
+        
         return t_new.multi_dim_me({us.begin(), us.end() - 1}, {shape.begin(), shape.end() - 1});
     }
 }

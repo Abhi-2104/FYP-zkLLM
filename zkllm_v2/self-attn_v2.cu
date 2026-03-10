@@ -31,8 +31,8 @@ int main(int argc, char *argv[])
     string layer_prefix = argv[5];
     string output_file = argv[6];
 
-    uint H = 32;  // Number of attention heads for Llama-2
-    uint d = E / H;  // Head dimension
+    uint H = 32;
+    uint d = E / H;
 
     cout << "\n======================================================================" << endl;
     cout << "Self-Attention Proof Generation (V2 Architecture)" << endl;
@@ -93,10 +93,11 @@ int main(int argc, char *argv[])
     vector<Fr_t> q_u_batch, q_u_input, q_u_output;
     vector<Fr_t> k_u_batch, k_u_input, k_u_output;
     vector<Fr_t> v_u_batch, v_u_input, v_u_output;
+    Fr_t q_init_claim, q_claim_W, k_init_claim, k_claim_W, v_init_claim, v_claim_W;
     
-    fc_q.prove(X, Q, q_proof_poly, q_u_batch, q_u_input, q_u_output);
-    fc_k.prove(X, K, k_proof_poly, k_u_batch, k_u_input, k_u_output);
-    fc_v.prove(X, V, v_proof_poly, v_u_batch, v_u_input, v_u_output);
+    fc_q.prove(X, Q, q_proof_poly, q_u_batch, q_u_input, q_u_output, q_init_claim, q_claim_W);
+    fc_k.prove(X, K, k_proof_poly, k_u_batch, k_u_input, k_u_output, k_init_claim, k_claim_W);
+    fc_v.prove(X, V, v_proof_poly, v_u_batch, v_u_input, v_u_output, v_init_claim, v_claim_W);
     cout << "      ✓ Q, K, V projections proved" << endl;
 
     // Step 2: Attention mechanism (uniform weights)
@@ -253,7 +254,8 @@ int main(int argc, char *argv[])
     
     vector<Polynomial> o_proof_poly;
     vector<Fr_t> o_u_batch, o_u_input, o_u_output;
-    fc_o.prove(attn_out, final_output, o_proof_poly, o_u_batch, o_u_input, o_u_output);
+    Fr_t o_init_claim, o_claim_W;
+    fc_o.prove(attn_out, final_output, o_proof_poly, o_u_batch, o_u_input, o_u_output, o_init_claim, o_claim_W);
     cout << "      ✓ Output projection proved\n" << endl;
 
     // Package proofs (like RMSNorm_v2)
@@ -291,6 +293,17 @@ int main(int argc, char *argv[])
     proof.o_u_batch = o_u_batch;
     proof.o_u_input = o_u_input;
     proof.o_u_output = o_u_output;
+    
+    // Store initial claims and weight claims for verification
+    proof.q_claim = q_init_claim;
+    proof.k_claim = k_init_claim;
+    proof.v_claim = v_init_claim;
+    proof.o_claim = o_init_claim;
+    
+    proof.q_claim_W = q_claim_W;
+    proof.k_claim_W = k_claim_W;
+    proof.v_claim_W = v_claim_W;
+    proof.o_claim_W = o_claim_W;
     
     // Q @ K^T (scores) challenges
     proof.s_u_batch = s_u_batch;

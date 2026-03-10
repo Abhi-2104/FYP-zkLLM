@@ -58,6 +58,12 @@ struct SelfAttnProof {
     std::vector<Fr_t> v_u_batch, v_u_input, v_u_output;  // V projection challenges
     std::vector<Fr_t> o_u_batch, o_u_input, o_u_output;  // O projection challenges
     
+    // Initial claims from prove() - verifier needs these for polynomial verification
+    Fr_t q_claim, k_claim, v_claim, o_claim;
+    
+    // Weight claims - for cross-verification (must match loaded weights)
+    Fr_t q_claim_W, k_claim_W, v_claim_W, o_claim_W;
+    
     // Q @ K^T challenges for verifying attention scores computation
     std::vector<Fr_t> s_u_batch, s_u_input, s_u_output;  // Scores (Q @ K^T) challenges
     
@@ -77,5 +83,56 @@ void save_self_attn_proof(const SelfAttnProof& proof, const std::string& filenam
 
 // Loads a complete Self-Attention proof from a binary file
 SelfAttnProof load_self_attn_proof(const std::string& filename);
+
+// FFN (Feed-Forward Network) proof structure
+struct FFNProof {
+    std::vector<Polynomial> up_proj_proof;    // Up projection proof
+    std::vector<Polynomial> gate_proj_proof;  // Gate projection proof
+    std::vector<Polynomial> down_proj_proof;  // Down projection proof
+    std::vector<Polynomial> swiglu_proof;     // SwiGLU activation proof
+    
+    // Random challenges from prove() calls
+    std::vector<Fr_t> up_u_batch, up_u_input, up_u_output;       // Up projection challenges
+    std::vector<Fr_t> gate_u_batch, gate_u_input, gate_u_output; // Gate projection challenges
+    std::vector<Fr_t> down_u_batch, down_u_input, down_u_output; // Down projection challenges
+    
+    // Initial claims from prove() - verifier uses these instead of recomputing
+    Fr_t up_claim, gate_claim, down_claim;
+    
+    // Weight claims - for cross-verification (must match loaded weights)
+    Fr_t up_claim_W, gate_claim_W, down_claim_W;
+    
+    // SwiGLU challenges
+    std::vector<Fr_t> swiglu_u, swiglu_v;  // SwiGLU table lookup challenges
+    Fr_t swiglu_r, swiglu_alpha, swiglu_beta;  // SwiGLU segment challenges
+    
+    // Claimed output evaluation point
+    std::vector<Fr_t> claimed_output_u;  // Random challenges for claimed output evaluation
+    Fr_t claimed_output;
+    int seq_len, embed_dim, hidden_dim;
+};
+
+// Saves a complete FFN proof to a binary file
+void save_ffn_proof(const FFNProof& proof, const std::string& filename);
+
+// Loads a complete FFN proof from a binary file
+FFNProof load_ffn_proof(const std::string& filename);
+
+// Skip Connection proof structure
+struct SkipConnectionProof {
+    std::vector<Fr_t> hadamard_sum_proof;  // Element-wise addition sumcheck proof
+    
+    // Random challenges for verification
+    std::vector<Fr_t> random_u;  // Random challenges for addition verification
+    
+    Fr_t claimed_output;  // Claimed sum value
+    int tensor_size;      // Size of tensors being added
+};
+
+// Saves a complete Skip Connection proof to a binary file
+void save_skip_connection_proof(const SkipConnectionProof& proof, const std::string& filename);
+
+// Loads a complete Skip Connection proof from a binary file
+SkipConnectionProof load_skip_connection_proof(const std::string& filename);
 
 #endif // PROOF_IO_V2_CUH

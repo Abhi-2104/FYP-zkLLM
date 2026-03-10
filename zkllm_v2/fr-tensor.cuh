@@ -85,6 +85,12 @@ class FrTensor
     FrTensor(uint size, const double* cpu_data, unsigned long scaling_factor);
 
     FrTensor(const FrTensor& t);
+    
+    // Move constructor - takes ownership of GPU memory without copying
+    FrTensor(FrTensor&& t) noexcept;
+    
+    // Move assignment operator
+    FrTensor& operator=(FrTensor&& t) noexcept;
 
     FrTensor(const string& filename);
 

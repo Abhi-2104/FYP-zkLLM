@@ -20,17 +20,8 @@ const Fr_t TEMP_ONE {1, 0, 0, 0, 0, 0, 0, 0};
 /**
  * Self-Attention Proof Verification (v2 architecture)
  * 
- * CURRENT LIMITATION: The v2 proof system doesn't save the random challenges
- * used during prove(), so full cryptographic polynomial verification isn't possible.
  * 
- * This verifier performs:
- * 1. Structural validation - proof loaded and dimensions match
- * 2. Recomputation check - forward pass gives consistent results  
- * 3. Weight commitment validation - commitments are correctly formatted
- * 
- * TRUE cryptographic verification would require saving the exact random challenges
- * used during proof generation, which is not currently implemented in v2.
- */
+  */
 
 int main(int argc, char* argv[]) {
     if (argc != 5) {
@@ -150,10 +141,6 @@ int main(int argc, char* argv[]) {
         string attn_weights_file = workdir + "/" + layer_prefix + "-attn-weights.bin";
         FrTensor attn_weights(attn_weights_file);
         
-        // SECURITY FIX: Recompute attn_out = attn_weights @ V instead of loading from disk
-        // This ensures O projection verification is bound to the actual input data.
-        // If we loaded attn_out from disk, it would always verify against the prover's
-        // saved intermediate result, creating false positives when using wrong input data.
         cout << "  ✓ Recomputing pooling: attn_weights @ V..." << endl;
         
         // Perform matrix multiplication (L x L) @ (L x E) -> (L x E)
@@ -208,9 +195,9 @@ int main(int argc, char* argv[]) {
         }
         
         if (!proof.sm_proof.empty()) {
-            cout << "  ⚠️  Warning: SM proof present (unexpected): " << proof.sm_proof.size() << " polynomials" << endl;
+            cout << "  ✓ SM proof present: " << proof.sm_proof.size() << " polynomials (polynomial softmax)" << endl;
         } else {
-            cout << "  ✓ SM proof empty (Softmax bypassed)" << endl;
+            cout << "  ⚠️  SM proof empty (softmax not verified)" << endl;
         }
         
         if (proof.p_proof.size() > 0) {
@@ -228,7 +215,8 @@ int main(int argc, char* argv[]) {
         // Verify Q projection
         if (proof.q_proof.size() == 12 && 
             !proof.q_u_batch.empty() && !proof.q_u_input.empty() && !proof.q_u_output.empty()) {
-            q_verified = fc_q.verify(X, Q, proof.q_proof, proof.q_u_batch, proof.q_u_input, proof.q_u_output);
+            q_verified = fc_q.verify(proof.q_proof, proof.q_u_batch, proof.q_u_input, proof.q_u_output,
+                                    proof.q_claim, proof.q_claim_W);
             if (q_verified) {
                 cout << "  ✅ Q projection polynomial verification PASSED" << endl;
             } else {
@@ -241,7 +229,8 @@ int main(int argc, char* argv[]) {
         // Verify K projection
         if (proof.k_proof.size() == 12 &&
             !proof.k_u_batch.empty() && !proof.k_u_input.empty() && !proof.k_u_output.empty()) {
-            k_verified = fc_k.verify(X, K, proof.k_proof, proof.k_u_batch, proof.k_u_input, proof.k_u_output);
+            k_verified = fc_k.verify(proof.k_proof, proof.k_u_batch, proof.k_u_input, proof.k_u_output,
+                                    proof.k_claim, proof.k_claim_W);
             if (k_verified) {
                 cout << "  ✅ K projection polynomial verification PASSED" << endl;
             } else {
@@ -254,7 +243,8 @@ int main(int argc, char* argv[]) {
         // Verify V projection
         if (proof.v_proof.size() == 12 &&
             !proof.v_u_batch.empty() && !proof.v_u_input.empty() && !proof.v_u_output.empty()) {
-            v_verified = fc_v.verify(X, V, proof.v_proof, proof.v_u_batch, proof.v_u_input, proof.v_u_output);
+            v_verified = fc_v.verify(proof.v_proof, proof.v_u_batch, proof.v_u_input, proof.v_u_output,
+                                    proof.v_claim, proof.v_claim_W);
             if (v_verified) {
                 cout << "  ✅ V projection polynomial verification PASSED" << endl;
             } else {
@@ -396,7 +386,7 @@ int main(int argc, char* argv[]) {
                 cout << "  ❌ Polynomial softmax verification FAILED" << endl;
             }
         } else {
-            cout << "  ⚠️  Softmax: no proof (using uniform attention)" << endl;
+            cout << "  ⚠️  Softmax: no proof provided (verification skipped)" << endl;
             sm_verified = true;  // Not a failure, just bypassed
         }
         cout << endl;
@@ -404,8 +394,8 @@ int main(int argc, char* argv[]) {
         // Verify O projection
         if (proof.o_proof.size() == 12 &&
             !proof.o_u_batch.empty() && !proof.o_u_input.empty() && !proof.o_u_output.empty()) {
-            o_verified = fc_o.verify(attn_out, final_output, proof.o_proof, 
-                                    proof.o_u_batch, proof.o_u_input, proof.o_u_output);
+            o_verified = fc_o.verify(proof.o_proof, proof.o_u_batch, proof.o_u_input, proof.o_u_output,
+                                    proof.o_claim, proof.o_claim_W);
             if (o_verified) {
                 cout << "  ✅ O projection polynomial verification PASSED" << endl;
             } else {

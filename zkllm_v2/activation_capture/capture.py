@@ -36,7 +36,7 @@ class ActivationCaptureManager:
         use_4bit: bool = True  # Enable 4-bit quantization by default
     ):
         self.model_size = model_size
-        # Use model-storage directory in zkllm-ccs2024/
+        # Use relative path to model-storage directory as requested
         self.model_cache_dir = "./model-storage"
         self.verbose = verbose
         self.use_4bit = use_4bit
@@ -48,13 +48,25 @@ class ActivationCaptureManager:
         
     def load_model(self):
         """Load LLaMA-2 model and tokenizer from local cache"""
-        model_card = f"meta-llama/Llama-2-{self.model_size}b-hf"
+        model_name = f"meta-llama/Llama-2-{self.model_size}b-hf"
         
+        # Try to resolve to the exact snapshot path to avoid network calls
+        cache_path = Path(self.model_cache_dir) / f"models--meta-llama--Llama-2-{self.model_size}b-hf"
+        if cache_path.exists():
+            snapshots_dir = cache_path / "snapshots"
+            if snapshots_dir.exists() and any(snapshots_dir.iterdir()):
+                model_card = str(next(snapshots_dir.iterdir()))
+            else:
+                model_card = model_name
+        else:
+            model_card = model_name
+            
         if self.verbose:
             print(f"\n{'='*70}")
             print(f"Loading LLaMA-2-{self.model_size}B Model")
             print(f"{'='*70}\n")
-            print(f"Model: {model_card}")
+            print(f"Model ID: {model_name}")
+            print(f"Path: {model_card}")
             print(f"Cache: {self.model_cache_dir}")
         
         # Check GPU availability and memory
