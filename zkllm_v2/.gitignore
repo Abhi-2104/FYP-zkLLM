@@ -10,7 +10,9 @@
 !README.md
 !README_V2.md
 !verification_readme.md
-
+!README_SKIP_CONNECTION.md
+!README_FFN.md
+!README_POST_ATTN_RMSNORM.md
 # Allow the new activation capture files and directories
 !activation_capture_readme.md
 !capture_activations.py
