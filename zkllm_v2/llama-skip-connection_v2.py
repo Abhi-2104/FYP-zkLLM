@@ -15,6 +15,12 @@ import fileio_utils
 
 
 if __name__ == '__main__':
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
     # Compile skip-connection v2
     compilation_error = os.system('make -f Makefile_v2 skip-connection_v2')
     if compilation_error:

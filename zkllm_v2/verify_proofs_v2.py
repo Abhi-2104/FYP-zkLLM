@@ -258,13 +258,8 @@ class ZkLLMProofVerifierV2:
                 failed_layers.append(layer)
                 print(f"\n❌ Layer {layer} had verification failures")
 
-                # Ask if continue
-                try:
-                    response = input("Continue with next layer? (y/n): ").strip().lower()
-                    if response != 'y':
-                        break
-                except:
-                    break
+                # Continue with next layer even on failure
+                pass
 
         # Final summary
         total_time = time.time() - start_time

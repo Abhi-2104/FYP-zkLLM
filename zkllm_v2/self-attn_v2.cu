@@ -19,8 +19,8 @@ using namespace std;
 
 int main(int argc, char *argv[])
 {
-    if (argc != 7) {
-        cerr << "Usage: " << argv[0] << " <input_file> <seq_len> <embed_dim> <workdir> <layer_prefix> <output_file>" << endl;
+    if (argc < 7) {
+        cerr << "Usage: " << argv[0] << " <input_file> <seq_len> <embed_dim> <workdir> <layer_prefix> <output_file> [num_heads]" << endl;
         return 1;
     }
 
@@ -31,7 +31,13 @@ int main(int argc, char *argv[])
     string layer_prefix = argv[5];
     string output_file = argv[6];
 
-    uint H = 32;
+    uint H = 32; // Default for 7B
+    if (argc >= 8) {
+        H = std::stoi(argv[7]);
+    } else if (E == 5120) {
+        H = 40; // Auto-detect 13B
+    }
+    
     uint d = E / H;
 
     cout << "\n======================================================================" << endl;
@@ -341,7 +347,7 @@ int main(int argc, char *argv[])
     cout << "    ✅ Proof saved successfully!" << endl;
     
     // Save output
-    final_output.save_int(output_file);
+    final_output.unmont().save_int(output_file);
 
     cout << "✅ Self-attention proof generated successfully!\n" << endl;
     cout << "  📊 Proof breakdown:" << endl;

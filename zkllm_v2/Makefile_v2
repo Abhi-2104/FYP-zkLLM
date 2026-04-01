@@ -1,16 +1,16 @@
 # Compilers
-NVCC := /home/abhi/miniconda3/envs/zkllm-env/bin/nvcc
+NVCC := /usr/local/cuda-12.5/bin/nvcc
 
 # Include and library paths
-INCLUDES := -I. -I/home/abhi/miniconda3/envs/zkllm-env/include
-LIBS := -L/home/abhi/miniconda3/envs/zkllm-env/lib -lcudart -lstdc++ -lm
+INCLUDES := -I. -I$(CONDA_PREFIX)/include
+LIBS := -L$(CONDA_PREFIX)/lib -lcudart -lstdc++ -lm
 
 # get compute capability from retrieved value
 ARCH := sm_86
 
 # NVCC compiler flags
 NVCC_FLAGS := -arch=$(ARCH) -std=c++17 --compiler-bindir=/usr/bin/gcc-12
-LD_FLAGS := -Xlinker -rpath=/home/abhi/miniconda3/envs/zkllm-env/lib
+LD_FLAGS := -Xlinker -rpath=$(CONDA_PREFIX)/lib
 
 # --- V2 Object Files ---
 # NOTE: self-attn_v2.cu is NOT included here because it's a standalone executable with main()
@@ -29,6 +29,10 @@ V2_OBJS := $(V2_OBJS:.cpp=.o)
 	$(NVCC) -x cu $(NVCC_FLAGS) $(INCLUDES) -dc $< -o $@
 
 # --- V2 Targets ---
+V2_BINARIES := rmsnorm_v2 verify_rmsnorm_v2 verify_rmsnorm_v2_real self-attn_v2 verify_self-attn_v2 ffn_v2 verify_ffn_v2 skip-connection_v2 verify_skip-connection_v2
+
+all: $(V2_BINARIES)
+
 rmsnorm_v2: rmsnorm_v2.cu $(V2_OBJS)
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 

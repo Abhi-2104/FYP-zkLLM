@@ -29,10 +29,15 @@ def prepare_swiglu(in_range_num_bit = 9, in_prec_num_bit = 12, out_prec_num_bit 
     """
 def prepare_swiglu(in_range_num_bit = 9, in_prec_num_bit = 12, out_prec_num_bit = 16):
     import torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     if not os.path.exists('swiglu-table.bin'):
         Xs = torch.arange(- (1 << (in_range_num_bit - 1)), 1 << (in_range_num_bit - 1), step = 1 / (1 << in_prec_num_bit), device = 0)
         Ys = Xs * torch.sigmoid(Xs)
         fileio_utils.save_int(Ys, out_prec_num_bit, 'swiglu-table.bin')
+        del Xs, Ys
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 if __name__ == '__main__':

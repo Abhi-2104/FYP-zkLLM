@@ -32,12 +32,14 @@ if __name__ == '__main__':
         from transformers import AutoModelForCausalLM
         model_card = f"meta-llama/Llama-2-{args.model_size}b-hf"
         model = AutoModelForCausalLM.from_pretrained(model_card, local_files_only = True, cache_dir = "./model-storage")
-        layer = getattr(model.model.layers[0], f'{args.which}_layernorm')
+        layer = getattr(model.model.layers[args.layer], f'{args.which}_layernorm')
         (embed_dim, ) = layer.weight.shape
         variance_epsilon = layer.variance_epsilon
         del model
         import gc
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     import torch
     import numpy as np
@@ -51,8 +53,7 @@ if __name__ == '__main__':
     workdir = f'./zkllm-workdir/Llama-2-{args.model_size}b'
     layer_prefix = f'layer-{args.layer}'
     # Save rms_inv to a permanent per-layer, per-type file.
-    # Named with 'input' tag to avoid collision with post_attention calls.
-    rms_inv_file = f'{workdir}/{layer_prefix}-input-rms_inv.bin'
+    rms_inv_file = f'{workdir}/{layer_prefix}-{args.which}-rms_inv.bin'
     fileio_utils.save_int(rms_inv, 1 << 16, rms_inv_file)
 
     ret = os.system(f'./rmsnorm_v2 {args.which} {args.input_file} {args.seq_len} {embed_dim} {workdir} {layer_prefix} {args.output_file} {rms_inv_file}')

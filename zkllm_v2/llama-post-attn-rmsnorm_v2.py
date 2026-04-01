@@ -5,7 +5,8 @@ import argparse
 
 parser = argparse.ArgumentParser(description='LLaMa-2 Post-Attention RMSNorm V2 - Proof Generation')
 parser.add_argument('model_size', type=int, choices = [7, 13], help='The size of the model to use. Default is 13')
-parser.add_argument('layer', type=int, help='The layer to use for post-attention rmsnorm')
+parser.add_argument('layer', type=int, help='The layer to use for rmsnorm')
+parser.add_argument('which', type=str, choices=['input', 'post_attention'], help='To use the input norm or the post-attention norm')
 parser.add_argument('seq_len', type=int, help='The sequence length to use for rmsnorm')
 parser.add_argument('--input_file', required = True, type=str, help='The input file to use for post-attention rmsnorm (output from self-attention)')
 parser.add_argument('--output_file', default = 'llama-post-attn-rmsnorm-output.bin', type=str, help='The output file to use for post-attention rmsnorm')
@@ -31,12 +32,14 @@ if __name__ == '__main__':
         from transformers import AutoModelForCausalLM
         model_card = f"meta-llama/Llama-2-{args.model_size}b-hf"
         model = AutoModelForCausalLM.from_pretrained(model_card, local_files_only = True, cache_dir = "./model-storage")
-        layer = getattr(model.model.layers[0], 'post_attention_layernorm')
+        layer = getattr(model.model.layers[args.layer], f'{args.which}_layernorm')
         (embed_dim, ) = layer.weight.shape
         variance_epsilon = layer.variance_epsilon
         del model
         import gc
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     import torch
     import numpy as np
@@ -51,10 +54,11 @@ if __name__ == '__main__':
     layer_prefix = f'layer-{args.layer}'
     # Save rms_inv to a permanent per-layer, per-type file so the verifier
     # can always find the correct one regardless of execution order.
-    rms_inv_file = f'{workdir}/{layer_prefix}-post_attention-rms_inv.bin'
+    # Save rms_inv for verifier
+    rms_inv_file = f'{workdir}/{layer_prefix}-{args.which}-rms_inv.bin'
     fileio_utils.save_int(rms_inv, 1 << 16, rms_inv_file)
     
-    ret = os.system(f'./rmsnorm_v2 post_attention {args.input_file} {args.seq_len} {embed_dim} {workdir} {layer_prefix} {args.output_file} {rms_inv_file}')
+    ret = os.system(f'./rmsnorm_v2 {args.which} {args.input_file} {args.seq_len} {embed_dim} {workdir} {layer_prefix} {args.output_file} {rms_inv_file}')
 
     try:
         import torch

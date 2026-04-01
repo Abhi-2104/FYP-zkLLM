@@ -11,6 +11,7 @@ parser.add_argument('--input_file', required = True, type=str, help='The input f
 parser.add_argument('--output_file', default = 'llama-self-attn-output.bin', type=str, help='The output file to use for self-attn')
 parser.add_argument('--precomputed', action='store_true', help='Use precomputed parameters (skip model loading)')
 parser.add_argument('--embed_dim', type=int, default=None, help='Embedding dimension (required with --precomputed)')
+parser.add_argument('--num_heads', type=int, default=None, help='Number of heads (required with --precomputed)')
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import fileio_utils
@@ -26,12 +27,18 @@ if __name__ == '__main__':
 
     if args.precomputed:
         embed_dim = args.embed_dim
+        num_heads = args.num_heads
     else:
         model_card = f"meta-llama/Llama-2-{args.model_size}b-hf"
         model = AutoModelForCausalLM.from_pretrained(model_card, local_files_only = True, cache_dir = "./model-storage")
         layer = model.model.layers[args.layer].self_attn
         embed_dim = layer.q_proj.in_features
+        num_heads = model.config.num_attention_heads
         del model
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     # Verify input file exists
     if not os.path.isfile(args.input_file):
@@ -42,4 +49,10 @@ if __name__ == '__main__':
     workdir = f'./zkllm-workdir/Llama-2-{args.model_size}b'
     layer_prefix = f'layer-{args.layer}'
     
-    os.system(f'./self-attn_v2 {args.input_file} {args.seq_len} {embed_dim} {workdir} {layer_prefix} {args.output_file}')
+    # Pass num_heads if available, otherwise let the binary auto-detect based on embed_dim
+    num_heads_arg = f" {num_heads}" if num_heads else ""
+    
+    ret = os.system(f'./self-attn_v2 {args.input_file} {args.seq_len} {embed_dim} {workdir} {layer_prefix} {args.output_file}{num_heads_arg}')
+    if ret != 0:
+        print(f"Error: self-attn_v2 failed with exit code {ret}")
+        exit(1)

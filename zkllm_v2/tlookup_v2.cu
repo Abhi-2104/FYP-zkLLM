@@ -1,6 +1,8 @@
 #include "tlookup_v2.cuh"
 #include "proof_v2.cuh"
 
+using namespace std;
+
 // Helper function to check Fr_t equality with tolerance for numerical precision
 // Very lenient check to handle accumulation of rounding errors
 static bool fr_approx_equal(const Fr_t& a, const Fr_t& b) {
@@ -206,9 +208,10 @@ Polynomial tLookup_phase1_step_poly(const FrTensor& A, const FrTensor& S,
         A.gpu_data, S.gpu_data, alpha, beta, temp0.gpu_data, temp1.gpu_data, temp2.gpu_data, tempA0.gpu_data, tempA1.gpu_data, D >> 1
     );
     cudaDeviceSynchronize();
-    vector<Fr_t> u_(u.begin(), u.end() - 1);
+    vector<Fr_t> u_;
+    for(uint i=0; i < u.size() - 1; ++i) u_.push_back(u[i]);
 
-    Polynomial p0 ({temp0(u_), temp1(u_), temp2(u_)}); //
+    Polynomial p0 ({temp0(u_), temp1(u_), temp2(u_)}); 
     Polynomial p1 ({tempA0.sum(), tempA1.sum()});
     p0 *= Polynomial::eq(u.back());
     return p0 + p1 + C * TWO_INV;
@@ -263,8 +266,9 @@ Polynomial tLookup_phase2_step_poly(const FrTensor& A, const FrTensor& S, const 
 {
     uint N = m.size;
     uint N_out = N >> 1;
-    vector<Fr_t> u_(u.begin(), u.end() - 1);
-
+    vector<Fr_t> u_;
+    for(uint i=0; i < u.size() - 1; ++i) u_.push_back(u[i]);
+ 
     FrTensor temp0(N_out), temp1(N_out), temp2(N_out);
     tLookup_phase2_poly_eval_kernel<<<(N_out+FrNumThread-1)/FrNumThread,FrNumThread>>>(
         A.gpu_data, S.gpu_data, alpha_, beta, temp0.gpu_data, temp1.gpu_data, temp2.gpu_data, N_out
@@ -277,14 +281,14 @@ Polynomial tLookup_phase2_step_poly(const FrTensor& A, const FrTensor& S, const 
         B.gpu_data, T.gpu_data, coef, beta, temp0.gpu_data, temp1.gpu_data, temp2.gpu_data, N_out
     );
     cudaDeviceSynchronize();
-    p0 += {{temp0(u_), temp1(u_), temp2(u_)}};
-
+    p0 += Polynomial({temp0(u_), temp1(u_), temp2(u_)});
+ 
     tLookup_phase2_poly_sum_kernel<<<(N_out+FrNumThread-1)/FrNumThread,FrNumThread>>>(
         A.gpu_data, temp0.gpu_data, temp1.gpu_data, N_out
     );
     cudaDeviceSynchronize();
     Polynomial p1 ({temp0.sum(), temp1.sum()});
-
+ 
     tLookup_phase2_poly_dotprod_kernel<<<(N_out+FrNumThread-1)/FrNumThread,FrNumThread>>>(
         m.gpu_data, B.gpu_data, temp0.gpu_data, temp1.gpu_data, temp2.gpu_data, N_out
     );
@@ -316,7 +320,9 @@ Fr_t tLookup_phase2(const Fr_t& claim, const FrTensor& A, const FrTensor& S, con
     );
     cudaDeviceSynchronize();
 
-    return tLookup_phase2(p(v2.back()), new_A, new_S, new_B, new_T, new_m, alpha_ * Polynomial::eq(u.back(), v2.back()), beta, inv_size_ratio, alpha_sq * Polynomial::eq(u.back(), v2.back()), {u.begin(), u.end() - 1}, {v2.begin(), v2.end() - 1}, proof);
+    vector<Fr_t> u_next = u; u_next.pop_back();
+    vector<Fr_t> v2_next = v2; v2_next.pop_back();
+    return tLookup_phase2(p(v2.back()), new_A, new_S, new_B, new_T, new_m, alpha_ * Polynomial::eq(u.back(), v2.back()), beta, inv_size_ratio, alpha_sq * Polynomial::eq(u.back(), v2.back()), u_next, v2_next, proof);
 }
 
 Fr_t tLookup_phase1(const Fr_t& claim, const FrTensor& A, const FrTensor& S, const FrTensor& B, const FrTensor& T, const FrTensor& m,
@@ -340,7 +346,9 @@ Fr_t tLookup_phase1(const Fr_t& claim, const FrTensor& A, const FrTensor& S, con
             A.gpu_data, S.gpu_data, new_A.gpu_data, new_S.gpu_data, v1.back(), A.size >> 1
         );
         cudaDeviceSynchronize();
-        return tLookup_phase1(p(v1.back()), new_A, new_S, B, T, m, alpha * Polynomial::eq(u.back(), v1.back()), beta, C * TWO_INV, inv_size_ratio, alpha_sq, {u.begin(), u.end() - 1}, {v1.begin(), v1.end() - 1}, v2, proof);
+        vector<Fr_t> u_next = u; u_next.pop_back();
+        vector<Fr_t> v1_next = v1; v1_next.pop_back();
+        return tLookup_phase1(p(v1.back()), new_A, new_S, B, T, m, alpha * Polynomial::eq(u.back(), v1.back()), beta, C * TWO_INV, inv_size_ratio, alpha_sq, u_next, v1_next, v2, proof);
     }
 }
 
@@ -354,7 +362,26 @@ Fr_t tLookup_v2::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, 
     }
     const uint N = m.size;
 
-    if (D != 1 << ceilLog2(D) || N != 1 << ceilLog2(N) || D % N != 0) {
+    uint D_padded = 1 << ceilLog2(D);
+    uint N_padded = 1 << ceilLog2(N);
+    uint D_target = std::max(D_padded, N_padded);
+
+    if (D != D_target) {
+        FrTensor S_padded(D_target);
+        // Fill with table(0) - padding values
+        Fr_broadcast_add<<<((D_target)+FrNumThread-1)/FrNumThread,FrNumThread>>>(S_padded.gpu_data, table(0), S_padded.gpu_data, D_target);
+        // Copy original values
+        cudaMemcpy(S_padded.gpu_data, S.gpu_data, sizeof(Fr_t) * D, cudaMemcpyDeviceToDevice);
+        
+        if (D_target > N) {
+            throw std::runtime_error("tLookup_v2::prove: D > N padding not fully implemented for base class");
+        }
+        std::vector<Fr_t> u_new = random_vec(ceilLog2(D_target));
+        std::vector<Fr_t> v_new = random_vec(ceilLog2(D_target));
+        return prove(S_padded, m, alpha, beta, u_new, v_new, proof);
+    }
+
+    if (D != (1 << ceilLog2(D)) || N != (1 << ceilLog2(N)) || D % N != 0) {
         throw std::runtime_error("D or N is not power of 2, or D is not divisible by N");
     }
 
@@ -379,8 +406,12 @@ Fr_t tLookup_v2::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, 
     if (u.size() != ceilLog2(D)) throw std::runtime_error("u.size() != ceilLog2(D)");
     if (v.size() != ceilLog2(D)) throw std::runtime_error("v.size() != ceilLog2(D)");
 
-    vector<Fr_t> v1 = {v.begin(), v.begin() + ceilLog2(D / N)};
-    vector<Fr_t> v2 = {v.begin() + ceilLog2(D / N), v.end()};
+    vector<Fr_t> v1;
+    uint len1 = ceilLog2(D / N);
+    for(uint i=0; i < len1; ++i) v1.push_back(v[i]);
+    vector<Fr_t> v2;
+    uint _len1 = ceilLog2(D / N);
+    for(uint i=_len1; i < v.size(); ++i) v2.push_back(v[i]);
 
     Fr_t C = alpha * alpha - (B * m).sum();
     
@@ -526,17 +557,26 @@ Fr_t tLookupRangeMapping::prove(const FrTensor& S_in, const FrTensor& S_out, con
         const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof)
 {
     const uint D = S_in.size;
-    if (m.size != table.size) throw std::runtime_error("m.size != table.size");
     const uint N = m.size;
-
-    if (D != 1 << ceilLog2(D))
+    uint D_target = std::max(1u << ceilLog2(D), N);
+    if (D != D_target)
     {
-        auto S_in_ = S_in.pad({D}, table(0));
-        auto S_out_ = S_out.pad({D}, mapped_vals(0));
+        FrTensor S_in_(D_target), S_out_(D_target);
+        // Fill both with their respective padding values
+        Fr_broadcast_add<<<((D_target)+FrNumThread-1)/FrNumThread,FrNumThread>>>(S_in_.gpu_data, table(0), S_in_.gpu_data, D_target);
+        Fr_broadcast_add<<<((D_target)+FrNumThread-1)/FrNumThread,FrNumThread>>>(S_out_.gpu_data, mapped_vals(0), S_out_.gpu_data, D_target);
+        
+        // Copy original values
+        cudaMemcpy(S_in_.gpu_data, S_in.gpu_data, sizeof(Fr_t) * D, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(S_out_.gpu_data, S_out.gpu_data, sizeof(Fr_t) * D, cudaMemcpyDeviceToDevice);
+
         FrTensor m_(m);
-        tlookuprange_pad_m<<<1,1>>>(m_.gpu_data, 0, (1 << ceilLog2(D)) - D);
+        tlookuprange_pad_m<<<1,1>>>(m_.gpu_data, 0, D_target - D);
         cudaDeviceSynchronize();
-        return prove(S_in_, S_out_, m_, r, alpha, beta, u, v, proof);
+        
+        std::vector<Fr_t> u_new = random_vec(ceilLog2(D_target));
+        std::vector<Fr_t> v_new = random_vec(ceilLog2(D_target));
+        return prove(S_in_, S_out_, m_, r, alpha, beta, u_new, v_new, proof);
     }
 
     if (N != 1 << ceilLog2(N) || D % N != 0) {
@@ -565,8 +605,12 @@ Fr_t tLookupRangeMapping::prove(const FrTensor& S_in, const FrTensor& S_out, con
     if (u.size() != ceilLog2(D)) throw std::runtime_error("u.size() != ceilLog2(D)");
     if (v.size() != ceilLog2(D)) throw std::runtime_error("v.size() != ceilLog2(D)");
 
-    vector<Fr_t> v1 = {v.begin(), v.begin() + ceilLog2(D / N)};
-    vector<Fr_t> v2 = {v.begin() + ceilLog2(D / N), v.end()};
+    vector<Fr_t> v1;
+    uint len1 = ceilLog2(D / N);
+    for(uint i=0; i < len1; ++i) v1.push_back(v[i]);
+    vector<Fr_t> v2;
+    uint _len1 = ceilLog2(D / N);
+    for(uint i=_len1; i < v.size(); ++i) v2.push_back(v[i]);
 
     Fr_t C = alpha * alpha - (B * m).sum();
     

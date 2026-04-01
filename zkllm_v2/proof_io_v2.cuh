@@ -36,6 +36,7 @@ struct RMSNormProof {
     // Random challenges for verification (enables standalone verifier)
     std::vector<Fr_t> random_u;                 // Random challenges for hadamard sumcheck
     std::vector<Fr_t> random_v;                 // Random challenges for hadamard sumcheck
+    Fr_t claimed_input;                         // Claimed input value at random_u
     Fr_t claimed_output;                        // Claimed inner product value
 };
 
@@ -125,8 +126,10 @@ struct SkipConnectionProof {
     // Random challenges for verification
     std::vector<Fr_t> random_u;  // Random challenges for addition verification
     
-    Fr_t claimed_output;  // Claimed sum value
-    int tensor_size;      // Size of tensors being added
+    Fr_t claimed_input_a;  // Claimed input A value at u
+    Fr_t claimed_input_b;  // Claimed input B value at u
+    Fr_t claimed_output;   // Claimed sum value (A+B) at u
+    int tensor_size;       // Size of tensors being added
 };
 
 // Saves a complete Skip Connection proof to a binary file

@@ -69,8 +69,10 @@ int main(int argc, char *argv[])
     // Compute claims at random point
     Fr_t x_claim = x(proof.random_u);
     Fr_t y_claim = y(proof.random_u);
+    proof.claimed_input_a = x_claim;
+    proof.claimed_input_b = y_claim;
     proof.claimed_output = x_claim + y_claim;
-    cout << "  ✓ Claimed output computed" << endl;
+    cout << "  ✓ Input and output claims computed" << endl;
     
     // Generate sumcheck proof for the addition operation
     // The proof verifies that sum_i (z[i] - x[i] - y[i]) * L_u(i) = 0

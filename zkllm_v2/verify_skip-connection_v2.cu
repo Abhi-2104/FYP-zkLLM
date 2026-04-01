@@ -133,14 +133,20 @@ int main(int argc, char *argv[])
             }
             cout << "..." << dec << endl;
             
-            if (computed_claim == proof.claimed_output && z_claim == proof.claimed_output) {
+            if (x_claim == proof.claimed_input_a && y_claim == proof.claimed_input_b && 
+                computed_claim == proof.claimed_output && z_claim == proof.claimed_output) {
                 cout << "\n  ✅ CLAIMED OUTPUT VERIFIED!" << endl;
+                cout << "     - A(u) and B(u) match proof claims" << endl;
                 cout << "     - A(u) + B(u) = Z(u) verified" << endl;
                 cout << "     - Element-wise addition is correct" << endl;
                 cout << "     - CRYPTOGRAPHIC BINDING VERIFIED" << endl;
                 claimed_output_verified = true;
             } else {
                 cout << "\n  ❌ CLAIMED OUTPUT MISMATCH!" << endl;
+                if (x_claim != proof.claimed_input_a) cout << "     - A(u) mismatch: Provided " << x_claim.val[0] << " != Proof " << proof.claimed_input_a.val[0] << endl;
+                if (y_claim != proof.claimed_input_b) cout << "     - B(u) mismatch: Provided " << y_claim.val[0] << " != Proof " << proof.claimed_input_b.val[0] << endl;
+                if (computed_claim != proof.claimed_output) cout << "     - Sum mismatch" << endl;
+                
                 cout << "     - Element-wise addition verification failed" << endl;
                 cout << "     - Either wrong inputs or malicious proof" << endl;
                 cout << "     - CRYPTOGRAPHIC BINDING CHECK FAILED" << endl;

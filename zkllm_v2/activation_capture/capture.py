@@ -177,11 +177,12 @@ class ActivationCaptureManager:
             print(f"  • Enable swap file for better performance\n")
         
         # Load entirely on CPU
+        # Use float16 to save 50% memory (26GB for 13B instead of 52GB)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_card,
             local_files_only=True,
             cache_dir=self.model_cache_dir,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.float16,
             device_map="cpu",
             low_cpu_mem_usage=True
         )
@@ -267,17 +268,42 @@ class ActivationCaptureManager:
             if device.type == 'cpu':
                 print("⚠ Running on CPU - this may take several minutes...")
         
+        # Clear cache before forward pass to maximize free contiguous VRAM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
         import time
         start_time = time.time()
         
-        with torch.no_grad():
-            outputs = self.model(**inputs)
+        try:
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                # Wait for completion to ensure OOM isn't deferred
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+        except torch.cuda.OutOfMemoryError as e:
+            if self.verbose:
+                print(f"\n✗ CUDA OUT OF MEMORY during forward pass")
+                print(f"  Attempting emergency cache clearance...")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            raise e
+        except Exception as e:
+            raise e
         
         inference_time = time.time() - start_time
         
         # Get prediction
         next_token_id = torch.argmax(outputs.logits[0, -1, :]).item()
         predicted_token = self.tokenizer.decode([next_token_id])
+        
+        # Explicit cleanup of large tensors
+        del inputs
+        outputs_logits = outputs.logits # keep logits for argmax but maybe del outputs if large
+        del outputs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         if self.verbose:
             print(f"✓ Inference complete ({inference_time:.2f} seconds)")

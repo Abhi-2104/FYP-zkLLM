@@ -22,17 +22,18 @@ from pathlib import Path
 
 
 class ZkLLMProofGeneratorV2:
-    def __init__(self, model_size=7, seq_len=128, workdir=None, model_card=None):
+    def __init__(self, model_size=7, device='cpu', start_layer=0, end_layer=31, seq_len=128):
         self.model_size = model_size
+        self.device = device
+        self.start_layer = start_layer
+        self.end_layer = end_layer
         self.seq_len = seq_len
-        self.workdir = workdir or f'./zkllm-workdir/Llama-2-{model_size}b'
-        self.model_card = model_card or f'meta-llama/Llama-2-{model_size}b-hf'
-        self.total_layers = 32 if model_size == 7 else 40
         
-        self.activation_dir = Path('./activations')
-        
-        # Create directories
-        Path(self.workdir).mkdir(parents=True, exist_ok=True)
+        # Setup workdir
+        model_name = "Llama-2-7b" if model_size == 7 else "Llama-2-13b"
+        self.workdir = Path(f"./zkllm-workdir/{model_name}")
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        self.activation_dir = Path("./activations")
         self.activation_dir.mkdir(exist_ok=True)
         
         # Track results
@@ -43,8 +44,47 @@ class ZkLLMProofGeneratorV2:
     
     def _load_model_params(self):
         """Load model once and extract parameters needed for proof generation"""
+        self.layer_input_eps = {}
+        self.layer_post_attn_eps = {}
+        
+        # 0. Try to load from cache first
+        import json
+        config_cache = self.workdir / "config.json"
+        if config_cache.exists():
+            with open(config_cache, 'r') as f:
+                cache_data = json.load(f)
+                self.embed_dim = cache_data.get('embed_dim')
+                self.hidden_dim = cache_data.get('hidden_dim')
+                self.num_heads = cache_data.get('num_heads')
+                self.variance_epsilon = cache_data.get('variance_epsilon', 1e-5)
+                self.layer_input_eps = {int(k): v for k, v in cache_data.get('layer_input_eps', {}).items()}
+                self.layer_post_attn_eps = {int(k): v for k, v in cache_data.get('layer_post_attn_eps', {}).items()}
+        
+        # 1. Check if we actually need to load the model
+        needs_loading = False
+        target_layers = range(self.start_layer, self.end_layer + 1)
+        for i in target_layers:
+            w_prefix = f"{self.workdir}/layer-{i}"
+            required = [
+                f"{w_prefix}-self_attn.q_proj.weight-int.bin",
+                f"{w_prefix}-mlp.up_proj.weight-int.bin",
+                f"{w_prefix}-input_layernorm.weight-int.bin"
+            ]
+            if not all(os.path.exists(f) for f in required):
+                needs_loading = True
+                break
+        
+        if not needs_loading and hasattr(self, 'embed_dim'):
+            print(f"  All required weights for layers {self.start_layer}-{self.end_layer} found. Skipping model load.")
+            return
+
+        # 2. Extract and save weights ONLY for requested layers to avoid OOM on 13B
         from transformers import AutoModelForCausalLM
+        import fileio_utils
         import gc
+        
+        # Determine layers to process
+        target_layers = range(self.start_layer, self.end_layer + 1)
         # Try to resolve exact snapshot to bypass network
         cache_path = Path("./model-storage") / f"models--meta-llama--Llama-2-{self.model_size}b-hf"
         if cache_path.exists():
@@ -52,9 +92,9 @@ class ZkLLMProofGeneratorV2:
             if snapshots_dir.exists() and any(snapshots_dir.iterdir()):
                 model_card_path = str(next(snapshots_dir.iterdir()))
             else:
-                model_card_path = self.model_card
+                model_card_path = f"meta-llama/Llama-2-{self.model_size}b-hf"
         else:
-            model_card_path = self.model_card
+            model_card_path = f"meta-llama/Llama-2-{self.model_size}b-hf"
 
         print(f"\nLoading model {model_card_path} to extract parameters...")
         model = AutoModelForCausalLM.from_pretrained(
@@ -63,13 +103,59 @@ class ZkLLMProofGeneratorV2:
         
         layer0 = model.model.layers[0]
         (self.embed_dim,) = layer0.input_layernorm.weight.shape
-        self.variance_epsilon = layer0.input_layernorm.variance_epsilon
+        self.variance_epsilon = getattr(model.config, "rms_norm_eps", 1e-6)
         self.hidden_dim = layer0.mlp.up_proj.out_features
+        self.num_heads = model.config.num_attention_heads
         
+        print(f"  Selective extraction: Saving weights for layers {self.start_layer} to {self.end_layer} to {self.workdir}...")
+        
+        for i, layer in enumerate(model.model.layers):
+            self.layer_input_eps[i] = layer.input_layernorm.variance_epsilon
+            self.layer_post_attn_eps[i] = layer.post_attention_layernorm.variance_epsilon
+            
+            if i in target_layers:
+                # Save weights (only if missing to save time)
+                w_prefix = f"{self.workdir}/layer-{i}"
+                
+                # RMSNorm Weights
+                if not os.path.exists(f"{w_prefix}-input_layernorm.weight-int.bin"):
+                    fileio_utils.save_int(layer.input_layernorm.weight, 1<<16, f"{w_prefix}-input_layernorm.weight-int.bin")
+                if not os.path.exists(f"{w_prefix}-post_attention_layernorm.weight-int.bin"):
+                    fileio_utils.save_int(layer.post_attention_layernorm.weight, 1<<16, f"{w_prefix}-post_attention_layernorm.weight-int.bin")
+                
+                # Self-Attention Weights
+                if not os.path.exists(f"{w_prefix}-self_attn.q_proj.weight-int.bin"):
+                    fileio_utils.save_int(layer.self_attn.q_proj.weight, 1<<16, f"{w_prefix}-self_attn.q_proj.weight-int.bin")
+                    fileio_utils.save_int(layer.self_attn.k_proj.weight, 1<<16, f"{w_prefix}-self_attn.k_proj.weight-int.bin")
+                    fileio_utils.save_int(layer.self_attn.v_proj.weight, 1<<16, f"{w_prefix}-self_attn.v_proj.weight-int.bin")
+                    fileio_utils.save_int(layer.self_attn.o_proj.weight, 1<<16, f"{w_prefix}-self_attn.o_proj.weight-int.bin")
+                
+                # FFN Weights
+                if not os.path.exists(f"{w_prefix}-mlp.gate_proj.weight-int.bin"):
+                    fileio_utils.save_int(layer.mlp.gate_proj.weight, 1<<16, f"{w_prefix}-mlp.gate_proj.weight-int.bin")
+                if not os.path.exists(f"{w_prefix}-mlp.up_proj.weight-int.bin"):
+                    fileio_utils.save_int(layer.mlp.up_proj.weight, 1<<16, f"{w_prefix}-mlp.up_proj.weight-int.bin")
+                if not os.path.exists(f"{w_prefix}-mlp.down_proj.weight-int.bin"):
+                    fileio_utils.save_int(layer.mlp.down_proj.weight, 1<<16, f"{w_prefix}-mlp.down_proj.weight-int.bin")
+                
+                # Help GC
+                gc.collect()
+
+        # Cache config
+        with open(config_cache, 'w') as f:
+            json.dump({
+                'embed_dim': self.embed_dim,
+                'hidden_dim': self.hidden_dim,
+                'num_heads': self.num_heads,
+                'variance_epsilon': self.variance_epsilon,
+                'layer_input_eps': self.layer_input_eps,
+                'layer_post_attn_eps': self.layer_post_attn_eps
+            }, f)
+
         del model
         gc.collect()
         
-        print(f"  embed_dim={self.embed_dim}, hidden_dim={self.hidden_dim}, eps={self.variance_epsilon}")
+        print(f"  embed_dim={self.embed_dim}, hidden_dim={self.hidden_dim}, heads={self.num_heads}")
         print(f"  Model unloaded from memory.\n")
         
         # Auto-detect real sequence length from capture output if available
@@ -110,19 +196,18 @@ class ZkLLMProofGeneratorV2:
         """
         input_file = self.activation_dir / f"layer-{layer}-block-input.bin"
         output_file = self.activation_dir / f"layer-{layer}-input-rmsnorm-activation.bin"
-        proof_file = self.workdir + f"/layer-{layer}-input-rmsnorm-proof.bin"
+        
+        eps = self.layer_input_eps.get(layer, self.variance_epsilon)
         
         cmd = [
-            'python3', 'llama-rmsnorm_v2.py',
+            sys.executable, 'llama-rmsnorm_v2.py',
             str(self.model_size), str(layer), 'input', str(self.seq_len),
             '--input_file', str(input_file),
             '--output_file', str(output_file),
             '--precomputed',
             '--embed_dim', str(self.embed_dim),
-            '--variance_epsilon', str(self.variance_epsilon)
+            '--variance_epsilon', str(eps)
         ]
-        # Ensure output proof file is named correctly
-        # If wrapper script allows custom proof file, pass it; else, rename after
         return self.run_command(cmd, f"Layer {layer} Input RMSNorm")
     
     def generate_self_attention(self, layer):
@@ -137,12 +222,13 @@ class ZkLLMProofGeneratorV2:
         output_file = self.activation_dir / f"layer-{layer}-self-attn-output.bin"
         
         cmd = [
-            'python3', 'llama-self-attn_v2.py',
+            sys.executable, 'llama-self-attn_v2.py',
             str(self.model_size), str(layer), str(self.seq_len),
             '--input_file', str(input_file),
             '--output_file', str(output_file),
             '--precomputed',
-            '--embed_dim', str(self.embed_dim)
+            '--embed_dim', str(self.embed_dim),
+            '--num_heads', str(self.num_heads)
         ]
         
         return self.run_command(cmd, f"Layer {layer} Self-Attention")
@@ -153,24 +239,25 @@ class ZkLLMProofGeneratorV2:
         
         Input: activations/layer-{N}-self-attn-output.bin
         Output: activations/layer-{N}-ffn-activation.bin
-        Proof: zkllm-workdir/.../layer-{N}-post_attention-rmsnorm-proof.bin
+        Proof: zkllm-workdir/.../layer-{N}-post-attn-rmsnorm-proof.bin
         """
         input_file = self.activation_dir / f"layer-{layer}-self-attn-output.bin"
         output_file = self.activation_dir / f"layer-{layer}-ffn-activation.bin"
-        proof_file = self.workdir + f"/layer-{layer}-post-attn-rmsnorm-proof.bin"
         
+        eps = self.layer_post_attn_eps.get(layer, self.variance_epsilon)
+        
+        # Use the unified rmsnorm script with which=post_attention
         cmd = [
-            'python3', 'llama-post-attn-rmsnorm_v2.py',
-            str(self.model_size), str(layer), str(self.seq_len),
+            sys.executable, 'llama-rmsnorm_v2.py',
+            str(self.model_size), str(layer), 'post_attention', str(self.seq_len),
             '--input_file', str(input_file),
             '--output_file', str(output_file),
             '--precomputed',
             '--embed_dim', str(self.embed_dim),
-            '--variance_epsilon', str(self.variance_epsilon)
+            '--variance_epsilon', str(eps)
         ]
-        # Ensure output proof file is named correctly
-        # If wrapper script allows custom proof file, pass it; else, rename after
         return self.run_command(cmd, f"Layer {layer} Post-Attention RMSNorm")
+
     
     def generate_ffn(self, layer):
         """
@@ -184,7 +271,7 @@ class ZkLLMProofGeneratorV2:
         output_file = self.activation_dir / f"layer-{layer}-ffn-output.bin"
         
         cmd = [
-            'python3', 'llama-ffn_v2.py',
+            sys.executable, 'llama-ffn_v2.py',
             str(self.model_size), str(layer), str(self.seq_len),
             '--input_file', str(input_file),
             '--output_file', str(output_file),
@@ -209,7 +296,7 @@ class ZkLLMProofGeneratorV2:
         skip_output = self.activation_dir / f"layer-{layer}-skip-output.bin"
         
         cmd = [
-            'python3', 'llama-skip-connection_v2.py',
+            sys.executable, 'llama-skip-connection_v2.py',
             str(self.model_size), str(layer), str(self.seq_len),
             '--block_input_file', str(block_input),
             '--block_output_file', str(ffn_output),
@@ -247,22 +334,27 @@ class ZkLLMProofGeneratorV2:
         # 1. Input RMSNorm
         print(f"\n[1/5] Input RMSNorm")
         results['input_rmsnorm'] = self.generate_input_rmsnorm(layer)
+        if not results['input_rmsnorm']: return False
         
         # 2. Self-Attention
         print(f"\n[2/5] Self-Attention")
         results['self_attn'] = self.generate_self_attention(layer)
+        if not results['self_attn']: return False
         
         # 3. Post-Attention RMSNorm
         print(f"\n[3/5] Post-Attention RMSNorm")
         results['post_attn_rmsnorm'] = self.generate_post_attn_rmsnorm(layer)
+        if not results['post_attn_rmsnorm']: return False
         
         # 4. Feed-Forward Network
         print(f"\n[4/5] Feed-Forward Network")
         results['ffn'] = self.generate_ffn(layer)
+        if not results['ffn']: return False
         
         # 5. Skip Connection
         print(f"\n[5/5] Skip Connection")
         results['skip_connection'] = self.generate_skip_connection(layer)
+        if not results['skip_connection']: return False
         
         # Print layer summary
         success_count = sum(results.values())
@@ -288,10 +380,8 @@ class ZkLLMProofGeneratorV2:
         print(f"\n{'='*70}")
         print(f"zkLLM v2 PROOF GENERATION PIPELINE")
         print(f"{'='*70}")
-        print(f"Model Card: {self.model_card}")
         print(f"Model Size: {self.model_size}b")
         print(f"Layers:     {start_layer} to {end_layer}")
-        print(f"Seq Length: {self.seq_len}")
         print(f"Work Dir:   {self.workdir}")
         print(f"Activations:{self.activation_dir}")
         print(f"{'='*70}")
@@ -314,14 +404,8 @@ class ZkLLMProofGeneratorV2:
             else:
                 failed_layers.append(layer)
                 print(f"\n❌ Layer {layer} had failures")
-                
-                # Ask if continue
-                try:
-                    response = input("Continue with next layer? (y/n): ").strip().lower()
-                    if response != 'y':
-                        break
-                except:
-                    break
+                # Continue with next layer regardless (standard for non-interactive)
+                continue
         
         # Final summary
         total_time = time.time() - start_time
@@ -356,12 +440,8 @@ Examples:
   # Generate proofs for layers 0 through 3
   python3 generate_proofs_v2.py --start_layer 0 --end_layer 3
   
-  # Generate for LLaMA-2-13b instead (uses model-storage/models--meta-llama--Llama-2-13b-hf
-  # and workdir zkllm-workdir/Llama-2-13b/)
+  # Generate for LLaMA-2-13b instead
   python3 generate_proofs_v2.py --model_size 13 --layer 0
-  
-  # Custom sequence length
-  python3 generate_proofs_v2.py --layer 0 --seq_len 64
         """
     )
     parser.add_argument('--model_size', type=int, choices=[7, 13], default=7,
@@ -374,20 +454,10 @@ Examples:
                         help='Starting layer (default: 0)')
     parser.add_argument('--end_layer', type=int, default=None,
                         help='Ending layer (default: same as start_layer)')
-    parser.add_argument('--workdir', type=str, default=None,
-                        help='Work directory path')
-    parser.add_argument('--model_card', type=str, default=None,
-                        help='Override model card (e.g., meta-llama/Llama-2-7b-hf or custom model)')
+    parser.add_argument('--device', type=str, default='cpu',
+                        help='Device to use (cpu or cuda)')
     
     args = parser.parse_args()
-    
-    # Create generator
-    generator = ZkLLMProofGeneratorV2(
-        model_size=args.model_size,
-        seq_len=args.seq_len,
-        workdir=args.workdir,
-        model_card=args.model_card
-    )
     
     # Determine layer range
     if args.layer is not None:
@@ -396,6 +466,15 @@ Examples:
     else:
         start_layer = args.start_layer
         end_layer = args.end_layer if args.end_layer is not None else start_layer
+    
+    # Create generator
+    generator = ZkLLMProofGeneratorV2(
+        model_size=args.model_size,
+        device=args.device,
+        start_layer=start_layer,
+        end_layer=end_layer,
+        seq_len=args.seq_len
+    )
     
     # Run generation
     successful, failed = generator.generate_all_proofs(

@@ -157,21 +157,39 @@ KERNEL void Fr_broadcast_mul(GLOBAL Fr_t* arr, Fr_t x, GLOBAL Fr_t* arr_out, uin
 
 FrTensor::FrTensor(uint size): size(size), gpu_data(nullptr)
 {
-    cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-    // Initialize to zero to avoid uninitialized memory issues
-    cudaMemset(gpu_data, 0, sizeof(Fr_t) * size);
+    if (size > 0) {
+        cudaError_t err = cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA malloc failed for size " << size << ": " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("CUDA malloc failed in FrTensor constructor");
+        }
+        // Initialize to zero to avoid uninitialized memory issues
+        cudaMemset(gpu_data, 0, sizeof(Fr_t) * size);
+    }
 }
 
 FrTensor::FrTensor(uint size, const Fr_t* cpu_data): size(size), gpu_data(nullptr)
 {
-    cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-    cudaMemcpy(gpu_data, cpu_data, sizeof(Fr_t) * size, cudaMemcpyHostToDevice);
+    if (size > 0) {
+        cudaError_t err = cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA malloc failed for size " << size << ": " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("CUDA malloc failed in FrTensor constructor");
+        }
+        cudaMemcpy(gpu_data, cpu_data, sizeof(Fr_t) * size, cudaMemcpyHostToDevice);
+    }
 }
 
 FrTensor::FrTensor(const FrTensor& t): size(t.size), gpu_data(nullptr)
 {
-    cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-    cudaMemcpy(gpu_data, t.gpu_data, sizeof(Fr_t) * size, cudaMemcpyDeviceToDevice);
+    if (size > 0) {
+        cudaError_t err = cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA malloc failed in copy constructor for size " << size << ": " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("CUDA malloc failed in FrTensor copy constructor");
+        }
+        cudaMemcpy(gpu_data, t.gpu_data, sizeof(Fr_t) * size, cudaMemcpyDeviceToDevice);
+    }
 }
 
 // Move constructor - takes ownership without copying
@@ -247,8 +265,14 @@ void FrTensor::save_long(const string& filename) const
 
 FrTensor::FrTensor(const string& filename): size(findsize(filename) / sizeof(Fr_t)), gpu_data(nullptr)
 {
-    cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-    loadbin(filename, gpu_data, sizeof(Fr_t) * size);
+    if (size > 0) {
+        cudaError_t err = cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA malloc failed for size " << size << " from " << filename << ": " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("CUDA malloc failed in FrTensor(filename) constructor");
+        }
+        loadbin(filename, gpu_data, sizeof(Fr_t) * size);
+    }
 }
 
 FrTensor FrTensor::from_int_bin(const string& filename)
