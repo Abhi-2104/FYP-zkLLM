@@ -1,7 +1,50 @@
 #include "fr-tensor.cuh"
 #include "ioutils.cuh"
+#include <cstdlib>
 
 using namespace std;
+
+namespace {
+bool should_use_managed(size_t bytes) {
+    const char* force = std::getenv("ZKLLM_FORCE_MANAGED");
+    if (force && (force[0] == '1' || force[0] == 'y' || force[0] == 'Y' || force[0] == 't' || force[0] == 'T')) {
+        return true;
+    }
+    const char* threshold = std::getenv("ZKLLM_MANAGED_THRESHOLD_MB");
+    if (threshold) {
+        unsigned long mb = std::strtoul(threshold, nullptr, 10);
+        if (mb > 0 && bytes >= mb * 1024UL * 1024UL) return true;
+    }
+    return false;
+}
+
+void* alloc_device_bytes(size_t bytes, const char* label) {
+    if (bytes == 0) return nullptr;
+    void* ptr = nullptr;
+    cudaError_t err = cudaSuccess;
+    const bool prefer_managed = should_use_managed(bytes);
+
+    if (!prefer_managed) {
+        err = cudaMalloc(&ptr, bytes);
+    }
+    if (prefer_managed || err != cudaSuccess) {
+        if (err != cudaSuccess) cudaGetLastError();
+        err = cudaMallocManaged(&ptr, bytes, cudaMemAttachGlobal);
+        if (err == cudaSuccess) {
+            std::cerr << "WARN: using managed memory for " << label << " (" << (bytes / (1024 * 1024)) << " MB)" << std::endl;
+        } else {
+            std::cerr << "ERROR: allocation failed for " << label << ": " << cudaGetErrorString(err) << std::endl;
+            return nullptr;
+        }
+    }
+    return ptr;
+}
+
+template <typename T>
+T* alloc_device_elems(size_t count, const char* label) {
+    return static_cast<T*>(alloc_device_bytes(sizeof(T) * count, label));
+}
+}
 
 ostream& operator<<(ostream& os, const Fr_t& x)
 {
@@ -157,39 +200,27 @@ KERNEL void Fr_broadcast_mul(GLOBAL Fr_t* arr, Fr_t x, GLOBAL Fr_t* arr_out, uin
 
 FrTensor::FrTensor(uint size): size(size), gpu_data(nullptr)
 {
-    if (size > 0) {
-        cudaError_t err = cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-        if (err != cudaSuccess) {
-            std::cerr << "CUDA malloc failed for size " << size << ": " << cudaGetErrorString(err) << std::endl;
-            throw std::runtime_error("CUDA malloc failed in FrTensor constructor");
-        }
-        // Initialize to zero to avoid uninitialized memory issues
-        cudaMemset(gpu_data, 0, sizeof(Fr_t) * size);
-    }
+    if (size == 0) return;
+    gpu_data = alloc_device_elems<Fr_t>(size, "FrTensor");
+    if (!gpu_data) return;
+    // Initialize to zero to avoid uninitialized memory issues
+    cudaMemset(gpu_data, 0, sizeof(Fr_t) * size);
 }
 
 FrTensor::FrTensor(uint size, const Fr_t* cpu_data): size(size), gpu_data(nullptr)
 {
-    if (size > 0) {
-        cudaError_t err = cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-        if (err != cudaSuccess) {
-            std::cerr << "CUDA malloc failed for size " << size << ": " << cudaGetErrorString(err) << std::endl;
-            throw std::runtime_error("CUDA malloc failed in FrTensor constructor");
-        }
-        cudaMemcpy(gpu_data, cpu_data, sizeof(Fr_t) * size, cudaMemcpyHostToDevice);
-    }
+    if (size == 0) return;
+    gpu_data = alloc_device_elems<Fr_t>(size, "FrTensor host copy");
+    if (!gpu_data) return;
+    cudaMemcpy(gpu_data, cpu_data, sizeof(Fr_t) * size, cudaMemcpyHostToDevice);
 }
 
 FrTensor::FrTensor(const FrTensor& t): size(t.size), gpu_data(nullptr)
 {
-    if (size > 0) {
-        cudaError_t err = cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-        if (err != cudaSuccess) {
-            std::cerr << "CUDA malloc failed in copy constructor for size " << size << ": " << cudaGetErrorString(err) << std::endl;
-            throw std::runtime_error("CUDA malloc failed in FrTensor copy constructor");
-        }
-        cudaMemcpy(gpu_data, t.gpu_data, sizeof(Fr_t) * size, cudaMemcpyDeviceToDevice);
-    }
+    if (size == 0) return;
+    gpu_data = alloc_device_elems<Fr_t>(size, "FrTensor copy");
+    if (!gpu_data) return;
+    cudaMemcpy(gpu_data, t.gpu_data, sizeof(Fr_t) * size, cudaMemcpyDeviceToDevice);
 }
 
 // Move constructor - takes ownership without copying
@@ -238,8 +269,8 @@ KERNEL void scalar_to_int_kernel(const Fr_t* scalar_ptr, int* int_ptr, uint n)
 
 void FrTensor::save_int(const string& filename) const
 {
-    int* int_gpu_data;
-    cudaMalloc((void **)&int_gpu_data, sizeof(int) * size);
+    int* int_gpu_data = alloc_device_elems<int>(size, "FrTensor save_int buffer");
+    if (!int_gpu_data) return;
     scalar_to_int_kernel<<<(size+FrNumThread-1)/FrNumThread,FrNumThread>>>(gpu_data, int_gpu_data, size);
     cudaDeviceSynchronize();
     savebin(filename, int_gpu_data, sizeof(int) * size);
@@ -255,8 +286,8 @@ KERNEL void scalar_to_long_kernel(const Fr_t* scalar_ptr, long* long_ptr, uint n
 
 void FrTensor::save_long(const string& filename) const
 {
-    long* long_gpu_data;
-    cudaMalloc((void **)&long_gpu_data, sizeof(long) * size);
+    long* long_gpu_data = alloc_device_elems<long>(size, "FrTensor save_long buffer");
+    if (!long_gpu_data) return;
     scalar_to_long_kernel<<<(size+FrNumThread-1)/FrNumThread,FrNumThread>>>(gpu_data, long_gpu_data, size);
     cudaDeviceSynchronize();
     savebin(filename, long_gpu_data, sizeof(long) * size);
@@ -265,22 +296,23 @@ void FrTensor::save_long(const string& filename) const
 
 FrTensor::FrTensor(const string& filename): size(findsize(filename) / sizeof(Fr_t)), gpu_data(nullptr)
 {
-    if (size > 0) {
-        cudaError_t err = cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-        if (err != cudaSuccess) {
-            std::cerr << "CUDA malloc failed for size " << size << " from " << filename << ": " << cudaGetErrorString(err) << std::endl;
-            throw std::runtime_error("CUDA malloc failed in FrTensor(filename) constructor");
-        }
-        loadbin(filename, gpu_data, sizeof(Fr_t) * size);
-    }
+    if (size == 0) return;
+    gpu_data = alloc_device_elems<Fr_t>(size, "FrTensor file");
+    if (!gpu_data) return;
+    loadbin(filename, gpu_data, sizeof(Fr_t) * size);
 }
 
 FrTensor FrTensor::from_int_bin(const string& filename)
 {
     auto size = findsize(filename) / sizeof(int);
     FrTensor out(size);
-    int* int_gpu_data;
-    cudaMalloc((void **)&int_gpu_data, sizeof(int) * size);
+    if (!out.gpu_data) return out;
+    int* int_gpu_data = alloc_device_elems<int>(size, "FrTensor int buffer");
+    if (!int_gpu_data) {
+        cudaFree(out.gpu_data);
+        out.gpu_data = nullptr;
+        return out;
+    }
     loadbin(filename, int_gpu_data, sizeof(int) * size);
     int_to_scalar_kernel<<<(size+FrNumThread-1)/FrNumThread,FrNumThread>>>(int_gpu_data, out.gpu_data, size);
     cudaFree(int_gpu_data);
@@ -291,9 +323,14 @@ FrTensor FrTensor::from_long_bin(const string& filename)
 {
     auto size = findsize(filename) / sizeof(long);
     FrTensor out(size);
-    long* long_gpu_data;
-    cudaMalloc((void **)&long_gpu_data, sizeof(int) * size);
-    loadbin(filename, long_gpu_data, sizeof(int) * size);
+    if (!out.gpu_data) return out;
+    long* long_gpu_data = alloc_device_elems<long>(size, "FrTensor long buffer");
+    if (!long_gpu_data) {
+        cudaFree(out.gpu_data);
+        out.gpu_data = nullptr;
+        return out;
+    }
+    loadbin(filename, long_gpu_data, sizeof(long) * size);
     long_to_scalar_kernel<<<(size+FrNumThread-1)/FrNumThread,FrNumThread>>>(long_gpu_data, out.gpu_data, size);
     cudaFree(long_gpu_data);
     return out;
@@ -533,7 +570,7 @@ KERNEL void random_kernel(Fr_t* gpu_data, uint n, unsigned long seed)
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     curandState state;
 
-    if (tid > n) return;
+    if (tid >= n) return;
     
     // Initialize the RNG state for this thread.
     curand_init(seed, tid, 0, &state);  
@@ -572,17 +609,17 @@ KERNEL void Fr_multi_dim_partial_me_step(GLOBAL Fr_t* arr_in, GLOBAL Fr_t *arr_o
     const uint gid = GET_GLOBAL_ID();
     if (gid >= other_dims * out_cur_dim * window_size) return;
 
-    uint ind0 = gid / (out_cur_dim * window_size);
-    uint ind1 = (gid / window_size) % out_cur_dim;
-    uint ind2 = gid % window_size;
+    uint64_t ind0 = (unsigned long long)gid / (out_cur_dim * window_size);
+    uint64_t ind1 = (uint64_t(gid) / window_size) % out_cur_dim;
+    uint64_t ind2 = gid % window_size;
     
     x = blstrs__scalar__Scalar_mont(x);
 
-    uint gid0 = ind0 * in_cur_dim * window_size + (2 * ind1) * window_size + ind2;
+    uint64_t gid0 = ind0 * in_cur_dim * window_size + (2 * ind1) * window_size + ind2;
 
     if (2 * ind1 + 1 < in_cur_dim) 
     {
-        uint gid1 = ind0 * in_cur_dim * window_size + (2 * ind1 + 1) * window_size + ind2;
+        uint64_t gid1 = ind0 * in_cur_dim * window_size + (2 * ind1 + 1) * window_size + ind2;
         arr_out[gid] = blstrs__scalar__Scalar_add(arr_in[gid0], blstrs__scalar__Scalar_mul(x, blstrs__scalar__Scalar_sub(arr_in[gid1], arr_in[gid0])));
     }
     else 
@@ -635,10 +672,10 @@ KERNEL void Fr_split_by_window(GLOBAL Fr_t *arr_in, GLOBAL Fr_t *arr0, GLOBAL Fr
     const uint gid = GET_GLOBAL_ID();
     if (gid >= out_size) return;
     
-    uint window_id = gid / window_size;
-    uint idx_in_window = gid % window_size;
-    uint gid0 = 2 * window_id * window_size + idx_in_window;
-    uint gid1 = (2 * window_id + 1) * window_size + idx_in_window;
+    uint64_t window_id = (uint64_t)gid / window_size;
+    uint64_t idx_in_window = gid % window_size;
+    uint64_t gid0 = 2ULL * window_id * window_size + idx_in_window;
+    uint64_t gid1 = (2ULL * window_id + 1) * window_size + idx_in_window;
     arr0[gid] = (gid0 < in_size) ? arr_in[gid0] : blstrs__scalar__Scalar_ZERO;
     arr1[gid] = (gid1 < in_size) ? arr_in[gid1] : blstrs__scalar__Scalar_ZERO;
 }
@@ -661,8 +698,8 @@ KERNEL void Fr_me_step(GLOBAL Fr_t *arr_in, GLOBAL Fr_t *arr_out, Fr_t x, uint i
     const uint gid = GET_GLOBAL_ID();
     if (gid >= out_size) return;
     
-    uint gid0 = 2 * gid;
-    uint gid1 = 2 * gid + 1;
+    uint64_t gid0 = 2ULL * gid;
+    uint64_t gid1 = 2ULL * gid + 1;
 
     x = blstrs__scalar__Scalar_mont(x);
     if (gid1 < in_size) arr_out[gid] = blstrs__scalar__Scalar_add(arr_in[gid0], blstrs__scalar__Scalar_mul(x, blstrs__scalar__Scalar_sub(arr_in[gid1], arr_in[gid0])));
@@ -700,10 +737,10 @@ KERNEL void Fr_partial_me_step(GLOBAL Fr_t *arr_in, GLOBAL Fr_t *arr_out, Fr_t x
     const uint gid = GET_GLOBAL_ID();
     if (gid >= out_size) return;
     
-    uint window_id = gid / window_size;
-    uint idx_in_window = gid % window_size;
-    uint gid0 = 2 * window_id * window_size + idx_in_window;
-    uint gid1 = (2 * window_id + 1) * window_size + idx_in_window;
+    uint64_t window_id = (uint64_t)gid / window_size;
+    uint64_t idx_in_window = gid % window_size;
+    uint64_t gid0 = 2ULL * window_id * window_size + idx_in_window;
+    uint64_t gid1 = (2ULL * window_id + 1) * window_size + idx_in_window;
 
     x = blstrs__scalar__Scalar_mont(x);
     if (gid1 < in_size) arr_out[gid] = blstrs__scalar__Scalar_add(arr_in[gid0], blstrs__scalar__Scalar_mul(x, blstrs__scalar__Scalar_sub(arr_in[gid1], arr_in[gid0])));
@@ -862,9 +899,15 @@ KERNEL void long_to_scalar_kernel(long* long_ptr, Fr_t* scalar_ptr, uint n)
 
 FrTensor::FrTensor(uint size, const int* cpu_data): size(size), gpu_data(nullptr)
 {
-    cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-    int* int_gpu_data;
-    cudaMalloc((void **)&int_gpu_data, sizeof(int) * size);
+    if (size == 0) return;
+    gpu_data = alloc_device_elems<Fr_t>(size, "FrTensor int host copy");
+    if (!gpu_data) return;
+    int* int_gpu_data = alloc_device_elems<int>(size, "FrTensor int staging");
+    if (!int_gpu_data) {
+        cudaFree(gpu_data);
+        gpu_data = nullptr;
+        return;
+    }
     cudaMemcpy(int_gpu_data, cpu_data, sizeof(int) * size, cudaMemcpyHostToDevice);
     int_to_scalar_kernel<<<(size+FrNumThread-1)/FrNumThread,FrNumThread>>>(int_gpu_data, gpu_data, size);
     cudaDeviceSynchronize();
@@ -873,9 +916,15 @@ FrTensor::FrTensor(uint size, const int* cpu_data): size(size), gpu_data(nullptr
 
 FrTensor::FrTensor(uint size, const long* cpu_data): size(size), gpu_data(nullptr)
 {
-    cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-    long* long_gpu_data;
-    cudaMalloc((void **)&long_gpu_data, sizeof(long) * size);
+    if (size == 0) return;
+    gpu_data = alloc_device_elems<Fr_t>(size, "FrTensor long host copy");
+    if (!gpu_data) return;
+    long* long_gpu_data = alloc_device_elems<long>(size, "FrTensor long staging");
+    if (!long_gpu_data) {
+        cudaFree(gpu_data);
+        gpu_data = nullptr;
+        return;
+    }
     cudaMemcpy(long_gpu_data, cpu_data, sizeof(long) * size, cudaMemcpyHostToDevice);
     long_to_scalar_kernel<<<(size+FrNumThread-1)/FrNumThread,FrNumThread>>>(long_gpu_data, gpu_data, size);
     cudaDeviceSynchronize();
@@ -912,9 +961,15 @@ KERNEL void double_to_scalar_kernel(double* double_ptr, Fr_t* scalar_ptr, unsign
 
 FrTensor::FrTensor(uint size, const float* cpu_data, unsigned long scaling_factor): size(size), gpu_data(nullptr)
 {
-    cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-    float* float_gpu_data;
-    cudaMalloc((void **)&float_gpu_data, sizeof(float) * size);
+    if (size == 0) return;
+    gpu_data = alloc_device_elems<Fr_t>(size, "FrTensor float host copy");
+    if (!gpu_data) return;
+    float* float_gpu_data = alloc_device_elems<float>(size, "FrTensor float staging");
+    if (!float_gpu_data) {
+        cudaFree(gpu_data);
+        gpu_data = nullptr;
+        return;
+    }
     cudaMemcpy(float_gpu_data, cpu_data, sizeof(float) * size, cudaMemcpyHostToDevice);
     float_to_scalar_kernel<<<(size+FrNumThread-1)/FrNumThread,FrNumThread>>>(float_gpu_data, gpu_data, scaling_factor, size);
     cudaDeviceSynchronize();
@@ -924,9 +979,15 @@ FrTensor::FrTensor(uint size, const float* cpu_data, unsigned long scaling_facto
 
 FrTensor::FrTensor(uint size, const double* cpu_data, unsigned long scaling_factor): size(size), gpu_data(nullptr)
 {
-    cudaMalloc((void **)&gpu_data, sizeof(Fr_t) * size);
-    double* double_gpu_data;
-    cudaMalloc((void **)&double_gpu_data, sizeof(double) * size);
+    if (size == 0) return;
+    gpu_data = alloc_device_elems<Fr_t>(size, "FrTensor double host copy");
+    if (!gpu_data) return;
+    double* double_gpu_data = alloc_device_elems<double>(size, "FrTensor double staging");
+    if (!double_gpu_data) {
+        cudaFree(gpu_data);
+        gpu_data = nullptr;
+        return;
+    }
     cudaMemcpy(double_gpu_data, cpu_data, sizeof(double) * size, cudaMemcpyHostToDevice);
     double_to_scalar_kernel<<<(size+FrNumThread-1)/FrNumThread,FrNumThread>>>(double_gpu_data, gpu_data, scaling_factor, size);
     cudaDeviceSynchronize();
@@ -937,9 +998,10 @@ KERNEL void FrTensor_pad_kernel(GLOBAL Fr_t* arr_in, GLOBAL Fr_t* arr_out, uint 
 {
     const uint gid = GET_GLOBAL_ID();
     if (gid >= N) return;
-    auto gid0 = gid / last_dim_out, gid1 = gid % last_dim_out;
+    unsigned long long gid0 = (unsigned long long)gid / last_dim_out;
+    uint gid1 = gid % last_dim_out;
     if (gid1 >= last_dim_in) arr_out[gid] = pad_val;
-    else arr_out[gid] = arr_in[gid0 * last_dim_in + gid1];
+    else arr_out[gid] = arr_in[(unsigned long long)gid0 * last_dim_in + gid1];
 }
 
 FrTensor FrTensor::pad(const vector<uint>& shape, const Fr_t& pad_val) const

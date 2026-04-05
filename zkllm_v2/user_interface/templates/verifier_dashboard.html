@@ -13,11 +13,15 @@
     <style>
         /* ── Verification Progress Tracker ─────────────────────── */
         .verify-tracker {
-            background: rgba(0,0,0,0.25);
-            border: 1px solid rgba(16,185,129,0.15);
+            background: var(--bg-card);
+            border: 1px solid var(--border);
             border-radius: var(--radius-md);
             padding: 1.5rem;
             margin-bottom: 1.5rem;
+        }
+        [data-theme="light"] .verify-tracker {
+            background: #ffffff;
+            border-color: rgba(15, 23, 42, 0.12);
         }
         .tracker-header {
             display: flex; align-items: center; justify-content: space-between;
@@ -40,6 +44,9 @@
         .bar-outer {
             height: 8px; background: rgba(255,255,255,0.06);
             border-radius: 99px; overflow: hidden;
+        }
+        [data-theme="light"] .bar-outer {
+            background: rgba(15, 23, 42, 0.08);
         }
         .bar-fill {
             height: 100%; border-radius: 99px;
@@ -67,6 +74,10 @@
             transition: border-color 0.3s, background 0.3s;
             position: relative;
             overflow: hidden;
+        }
+        [data-theme="light"] .module-card {
+            background: #ffffff;
+            border-color: rgba(15, 23, 42, 0.12);
         }
         .module-card::before {
             content: '';
@@ -109,14 +120,50 @@
             color: var(--text-muted);
             transition: all 0.2s;
         }
-        .layer-pill.active { background: var(--hover-bg); border-color: var(--amber); color: var(--amber); }
-        .layer-pill.done   { background: var(--hover-bg); border-color: var(--emerald); color: var(--emerald); }
-        .layer-pill.failed { background: var(--hover-bg); border-color: var(--rose);  color: var(--rose); }
+        [data-theme="light"] .layer-pill {
+            background: #ffffff;
+            border-color: rgba(15, 23, 42, 0.12);
+            color: #475569;
+        }
+        .layer-pill.active {
+            background: rgba(245, 158, 11, 0.18);
+            border-color: rgba(245, 158, 11, 0.75);
+            color: var(--amber);
+            box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.18) inset;
+        }
+        .layer-pill.done {
+            background: rgba(16, 185, 129, 0.18);
+            border-color: rgba(16, 185, 129, 0.75);
+            color: var(--emerald);
+            box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.18) inset;
+        }
+        .layer-pill.failed {
+            background: rgba(244, 63, 94, 0.18);
+            border-color: rgba(244, 63, 94, 0.78);
+            color: var(--rose);
+            box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.18) inset;
+        }
+
+        [data-theme="light"] .layer-pill.active {
+            background: #fef3c7;
+            border-color: #f59e0b;
+            color: #92400e;
+        }
+        [data-theme="light"] .layer-pill.done {
+            background: #dcfce7;
+            border-color: #10b981;
+            color: #065f46;
+        }
+        [data-theme="light"] .layer-pill.failed {
+            background: #ffe4e6;
+            border-color: #f43f5e;
+            color: #9f1239;
+        }
 
         /* ── Telemetry Panel ──────────────────────────────────── */
         .telemetry-grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(3, 1fr);
             gap: 1rem;
             margin-bottom: 1.5rem;
         }
@@ -138,7 +185,6 @@
         .telem-card.c-indigo::after { background: var(--indigo); }
         .telem-card.c-emerald::after { background: var(--emerald); }
         .telem-card.c-amber::after { background: var(--amber); }
-        .telem-card.c-violet::after { background: var(--violet); }
         .telem-label {
             font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
             letter-spacing: 0.08em; color: var(--text-muted);
@@ -156,7 +202,6 @@
         .c-indigo .telem-bar-fill  { background: var(--indigo); }
         .c-emerald .telem-bar-fill { background: var(--emerald); }
         .c-amber .telem-bar-fill   { background: var(--amber); }
-        .c-violet .telem-bar-fill  { background: var(--violet); }
 
         /* Result log column items */
         .result-item {
@@ -177,7 +222,7 @@
 <body>
     <!-- Layer Modal -->
     <div id="layer-modal" class="modal-overlay">
-        <div class="modal card" style="max-width: 450px; width: 90%;">
+        <div class="modal card" style=" width: 90%;">
             <h3 id="modal-title-text" style="margin-bottom:0.5rem; color:var(--emerald);">Configure Operation</h3>
             <p id="modal-sub-text" class="text-secondary" style="font-size:0.85rem; margin-bottom:1.25rem;"></p>
 
@@ -248,7 +293,7 @@
         </div>
     </nav>
 
-    <main class="container" style="padding-top: 6rem; max-width: 1280px;">
+    <main class="container" style="padding-top: 6rem; ">
 
         <!-- Page Header -->
         <div class="flex-between fade-up" style="margin-bottom: 2rem;">
@@ -265,10 +310,10 @@
         <!-- ── TELEMETRY ROW ─────────────────────────────────────────────── -->
         <div class="telemetry-grid fade-up" style="transition-delay:0.05s;">
             <div class="telem-card c-indigo">
-                <div class="telem-label">Sessions Verified</div>
-                <div class="telem-value" id="t-sessions">—</div>
-                <div class="telem-sub">Total audit operations completed</div>
-                <div class="telem-bar"><div class="telem-bar-fill" id="t-sessions-bar" style="width:0%"></div></div>
+                <div class="telem-label">Verification Runs</div>
+                <div class="telem-value" id="t-runs">—</div>
+                <div class="telem-sub">All-time verification attempts triggered</div>
+                <div class="telem-bar"><div class="telem-bar-fill" id="t-runs-bar" style="width:0%"></div></div>
             </div>
             <div class="telem-card c-emerald">
                 <div class="telem-label">Pass Rate</div>
@@ -281,12 +326,6 @@
                 <div class="telem-value" id="t-time">—</div>
                 <div class="telem-sub">Most recent audit duration</div>
                 <div class="telem-bar"><div class="telem-bar-fill" id="t-time-bar" style="width:0%"></div></div>
-            </div>
-            <div class="telem-card c-violet">
-                <div class="telem-label">Layers Audited</div>
-                <div class="telem-value" id="t-layers">—</div>
-                <div class="telem-sub">Transformer layers covered</div>
-                <div class="telem-bar"><div class="telem-bar-fill" id="t-layers-bar" style="width:0%"></div></div>
             </div>
         </div>
 
@@ -306,7 +345,7 @@
                         <svg viewBox="0 0 24 24" style="width:1rem;height:1rem;display:inline;margin-right:0.4rem;"><path d="M5 3l14 9-14 9V3z"/></svg>
                         Trigger Verification
                     </button>
-                    <button id="stop-verify-btn" class="btn btn-block" style="padding: 0.875rem; background: var(--hover-bg); color: var(--rose); border: 1px solid var(--rose);" disabled>
+                    <button id="stop-verify-btn" class="btn btn-block hidden" style="padding: 0.875rem; background: var(--hover-bg); color: var(--rose); border: 1px solid var(--rose);" disabled>
                         ✕ Abort Audit
                     </button>
                 </div>
@@ -329,6 +368,38 @@
 
             <!-- Right: Progress + Terminals -->
             <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+
+                <!-- Proof Generation Tracker -->
+                <div id="proof-progress-box" class="card hidden" style="border-color: rgba(99,102,241,0.3);">
+                    <div class="flex-between" style="margin-bottom: 0.75rem;">
+                        <div style="display:flex; align-items:center; gap:0.5rem; font-weight: 600; font-size:0.9rem;">
+                            <svg viewBox="0 0 24 24" style="color:var(--indigo); width: 1.1rem; flex-shrink:0;" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6M3 12a9 9 0 0115-6.7L21 8M3 22v-6h6M21 12a9 9 0 01-15 6.7L3 16"/></svg>
+                            ZK Proof Generation
+                        </div>
+                        <div style="display:flex; gap:0.5rem; align-items:center;">
+                            <div id="bdg-gen" class="badge badge-warning hidden"><span class="dot" style="background:currentColor"></span> Generating</div>
+                            <div id="bdg-ver" class="badge badge-success hidden">✓ Complete</div>
+                            <div id="bdg-fail" class="badge badge-rose hidden">✗ Failed</div>
+                        </div>
+                    </div>
+                    <div id="proof-module-pills" style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.75rem;">
+                        <span class="proof-module-pill" id="pmp-input_rmsnorm" data-label="Input Norm">📐 Input Norm</span>
+                        <span class="proof-module-pill" id="pmp-self_attn" data-label="Self-Attn">🧠 Self-Attn</span>
+                        <span class="proof-module-pill" id="pmp-post_attn_rmsnorm" data-label="Post Norm">📏 Post Norm</span>
+                        <span class="proof-module-pill" id="pmp-ffn" data-label="FFN">⚡ FFN</span>
+                        <span class="proof-module-pill" id="pmp-skip_connection" data-label="Skip">🔗 Skip</span>
+                    </div>
+                    <p id="proof-status-text" class="text-secondary" style="font-family:'JetBrains Mono',monospace; font-size:0.75rem; margin-bottom: 0.5rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Waiting for proof generation…</p>
+                    <div class="progress-wrap">
+                        <div class="progress-bar">
+                            <div id="proof-pb-fill" class="progress-fill"></div>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">
+                        <span id="proof-layer-info">Layer — / —</span>
+                        <span id="proof-pct-label">0%</span>
+                    </div>
+                </div>
 
                 <!-- Verification Progress Tracker -->
                 <div id="verify-tracker-box" class="verify-tracker" style="display:none;">
@@ -371,14 +442,13 @@
                                 <h3 class="card-title" style="font-size:0.82rem; margin-bottom:0; color: var(--indigo);">⚡ Proof Trace</h3>
                                 <div style="display: flex; gap: 0.5rem; align-items: center;">
                                     <button class="btn btn-sm" onclick="clearTerminal('proof-terminal')" style="font-size: 0.6rem; padding: 0.1rem 0.4rem; opacity: 0.4;">Clear</button>
+                                    <button class="btn btn-sm" onclick="downloadTerminalLog('proof-terminal','proof-trace')" style="font-size: 0.6rem; padding: 0.1rem 0.4rem; opacity: 0.6;">Download</button>
                                     <button class="expand-btn" onclick="toggleExpand('proof-container')">
                                         <svg viewBox="0 0 24 24" style="width:1rem;height:1rem;"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
                                     </button>
                                 </div>
                             </div>
-                            <div id="proof-terminal" class="terminal" style="flex-grow: 1; height: 220px; font-size: 0.72rem;">
-                                <div class="ter-line ter-info" style="opacity:0.5">Awaiting trace logs...</div>
-                            </div>
+                            <div id="proof-terminal" class="terminal" style="flex-grow: 1; height: 220px; font-size: 0.72rem;">Awaiting trace logs...</div>
                         </div>
                     </div>
 
@@ -388,14 +458,13 @@
                                 <h3 class="card-title" style="font-size:0.82rem; margin-bottom:0; color: var(--emerald);">🔐 Audit Log</h3>
                                 <div style="display: flex; gap: 0.5rem; align-items: center;">
                                     <button class="btn btn-sm" onclick="clearTerminal('verify-terminal')" style="font-size: 0.6rem; padding: 0.1rem 0.4rem; opacity: 0.4;">Clear</button>
+                                    <button class="btn btn-sm" onclick="downloadTerminalLog('verify-terminal','audit-log')" style="font-size: 0.6rem; padding: 0.1rem 0.4rem; opacity: 0.6;">Download</button>
                                     <button class="expand-btn" onclick="toggleExpand('verify-container')">
                                         <svg viewBox="0 0 24 24" style="width:1rem;height:1rem;"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
                                     </button>
                                 </div>
                             </div>
-                            <div id="verify-terminal" class="terminal" style="flex-grow: 1; height: 220px; font-size: 0.72rem;">
-                                <div class="ter-line ter-info" style="opacity:0.5">Awaiting audit signals...</div>
-                            </div>
+                            <div id="verify-terminal" class="terminal" style="flex-grow: 1; height: 220px; font-size: 0.72rem;">Awaiting audit signals...</div>
                         </div>
                     </div>
                 </div>
@@ -407,7 +476,12 @@
                             <svg viewBox="0 0 24 24" style="width:1.2rem;height:1.2rem;display:inline;color:var(--indigo);margin-right:0.4rem;vertical-align:bottom;"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" fill="currentColor"/></svg>
                             Provenance Cross-Check
                         </div>
-                        <button class="btn btn-sm btn-ghost" onclick="crossVerify()" style="font-size:0.65rem;">Run Ledger Sync</button>
+                        <div style="display:flex; gap:0.5rem; align-items:center;">
+                            <button class="btn btn-sm btn-ghost" onclick="crossVerify()" style="font-size:0.65rem;">Run Ledger Sync</button>
+                            <button class="expand-btn" onclick="toggleProvenanceExpand()" title="Expand provenance panel" style="width:1.9rem; height:1.9rem;">
+                                <svg viewBox="0 0 24 24" style="width:1rem;height:1rem;"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+                            </button>
+                        </div>
                     </div>
                     
                     <div id="cross-verify-idle" style="text-align:center; padding:1.5rem; border:1px dashed var(--border); border-radius:var(--radius-sm); opacity:0.6;">
@@ -424,6 +498,13 @@
                                 <div style="font-size:0.6rem; text-transform:uppercase; color:var(--text-muted); margin-bottom:0.5rem;">Ledger Audit State</div>
                                 <div id="ledger-audit-list" style="font-size:0.75rem; color:var(--text); line-height:1.6;"></div>
                             </div>
+                        </div>
+                        <div style="margin-top:1rem; padding:1rem; background:var(--hover-bg); border-radius:var(--radius-sm);">
+                            <div class="flex-between" style="margin-bottom:0.5rem; gap:0.75rem;">
+                                <div style="font-size:0.6rem; text-transform:uppercase; color:var(--text-muted);">Layer & Parameter Verification Detail</div>
+                                <span id="ledger-audit-detail-summary" class="badge badge-neutral" style="font-size:0.64rem;">—</span>
+                            </div>
+                            <div id="ledger-audit-detail-list" style="max-height:220px; overflow:auto; font-family:'JetBrains Mono', monospace; font-size:0.72rem; line-height:1.5; color:var(--text-secondary);"></div>
                         </div>
                         <div id="cross-verify-status" style="margin-top:1rem; padding:0.75rem; text-align:center; font-weight:700; border-radius:var(--radius-sm); font-size:0.8rem;"></div>
                     </div>
@@ -555,6 +636,33 @@
             } catch (e) { console.error(e); }
         }
 
+        function toggleProvenanceExpand() {
+            const card = document.getElementById('provenance-card');
+            if (!card) return;
+            const expanded = card.dataset.expanded === '1';
+            if (!expanded) {
+                card.dataset.expanded = '1';
+                card.style.position = 'fixed';
+                card.style.left = '2rem';
+                card.style.right = '2rem';
+                card.style.top = '4.5rem';
+                card.style.bottom = '1.5rem';
+                card.style.zIndex = '60';
+                card.style.overflow = 'auto';
+                card.style.boxShadow = '0 20px 80px rgba(0,0,0,0.35)';
+            } else {
+                card.dataset.expanded = '0';
+                card.style.position = '';
+                card.style.left = '';
+                card.style.right = '';
+                card.style.top = '';
+                card.style.bottom = '';
+                card.style.zIndex = '';
+                card.style.overflow = '';
+                card.style.boxShadow = '';
+            }
+        }
+
         async function crossVerify() {
             const sid = document.getElementById('verify-session-id').value;
             if (!sid) return alert("Please enter a Session ID first.");
@@ -563,6 +671,8 @@
             const activeEl = document.getElementById('cross-verify-active');
             const claimsList = document.getElementById('c2pa-claims-list');
             const ledgerList = document.getElementById('ledger-audit-list');
+            const detailList = document.getElementById('ledger-audit-detail-list');
+            const detailSummary = document.getElementById('ledger-audit-detail-summary');
             const statusEl = document.getElementById('cross-verify-status');
 
             idleEl.style.display = 'none';
@@ -572,6 +682,9 @@
             statusEl.style.color = 'var(--text-muted)';
             claimsList.innerHTML = 'Loading...';
             ledgerList.innerHTML = 'Loading...';
+            detailList.innerHTML = 'Loading verification details...';
+            detailSummary.className = 'badge badge-neutral';
+            detailSummary.textContent = 'Loading…';
 
             try {
                 // 1. Fetch Manifest
@@ -601,8 +714,60 @@
                     <b>Session ID:</b> ${lData.id}<br>
                     <b>Inference:</b> ${lData.inference_status}<br>
                     <b>ZKP Proof:</b> ${lData.proof_status}<br>
-                    <b>ZKP Verify:</b> ${lData.verify_status}
+                    <b>ZKP Verify:</b> ${lData.verify_status}<br>
+                    <b>Verify Runs:</b> ${lData.verify_runs ?? 0}
                 `;
+
+                const structuredEvents = Array.isArray(lData.verify_audit) ? lData.verify_audit : [];
+                const fallbackLines = Array.isArray(lData.verify_log) ? lData.verify_log : [];
+                const normalizeFallback = (line) => {
+                    const lc = String(line || '').toLowerCase();
+                    let status = 'info';
+                    if (line && (line.includes('✅') || lc.includes(' passed') || lc.includes(' successful'))) status = 'pass';
+                    else if (line && (line.includes('❌') || lc.includes(' failed') || lc.startsWith('error'))) status = 'fail';
+                    else if (line && (line.includes('⚠') || lc.includes('warning') || lc.includes('skip'))) status = 'warn';
+                    const lm = String(line || '').match(/layer\s+(\d+)/i);
+                    return {
+                        status,
+                        layer: lm ? Number(lm[1]) : null,
+                        module_label: 'Verification Runner',
+                        parameter: null,
+                        line: String(line || ''),
+                    };
+                };
+                const events = (structuredEvents.length ? structuredEvents : fallbackLines.map(normalizeFallback)).slice(-200);
+                const passCount = events.filter(e => e.status === 'pass').length;
+                const failCount = events.filter(e => e.status === 'fail').length;
+                const warnCount = events.filter(e => e.status === 'warn').length;
+
+                if (!events.length) {
+                    detailList.innerHTML = '<div style="opacity:0.7;">No per-layer verification details available for this session yet.</div>';
+                    detailSummary.className = 'badge badge-neutral';
+                    detailSummary.textContent = 'No logs';
+                } else {
+                    detailList.innerHTML = events.map(ev => {
+                        const icon = ev.status === 'pass' ? '✅' : ev.status === 'fail' ? '❌' : ev.status === 'warn' ? '⚠️' : '•';
+                        const color = ev.status === 'pass' ? 'var(--emerald)' : ev.status === 'fail' ? 'var(--rose)' : ev.status === 'warn' ? 'var(--amber)' : 'var(--text-secondary)';
+                        const layer = Number.isFinite(Number(ev.layer)) ? `L${ev.layer}` : 'L?';
+                        const module = ev.module_label || ev.module || 'module';
+                        const param = ev.parameter ? ` · ${ev.parameter}` : '';
+                        const esc = (s) => String(s || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+                        return `
+                            <div style="padding:0.45rem 0.2rem; border-bottom:1px dashed var(--border);">
+                                <div style="font-weight:700; color:${color};">${icon} ${layer} · ${esc(module)}${esc(param)}</div>
+                                <div style="margin-top:0.15rem; color:var(--text-secondary);">${esc(ev.line || '')}</div>
+                            </div>
+                        `;
+                    }).join('');
+
+                    if (failCount > 0) {
+                        detailSummary.className = 'badge badge-rose';
+                        detailSummary.textContent = `${passCount} pass · ${failCount} fail · ${warnCount} warn`;
+                    } else {
+                        detailSummary.className = 'badge badge-success';
+                        detailSummary.textContent = `${passCount} pass · ${warnCount} warn`;
+                    }
+                }
 
                 const match = (parseInt(mMeta.session_id) === parseInt(lData.id));
                 const tampered = (lData.c2pa_status === 'tampered');
@@ -624,6 +789,9 @@
             } catch (err) {
                 console.error(err);
                 statusEl.textContent = '❌ Cross-verify engine error';
+                detailList.innerHTML = '<div style="color:var(--rose);">Failed to load layer/parameter details.</div>';
+                detailSummary.className = 'badge badge-rose';
+                detailSummary.textContent = 'Error';
             }
         }
         </script>
@@ -642,7 +810,7 @@
                     <thead>
                         <tr>
                             <th style="width: 5%; color: var(--text-muted); font-size: 0.75rem;">#</th>
-                            <th style="width: 10%; color: var(--text-muted); font-size: 0.75rem;">Time</th>
+                            <th style="width: 10%; color: var(--text-muted); font-size: 0.75rem;">Date / Time (IST)</th>
                             <th style="width: 10%; color: var(--text-muted); font-size: 0.75rem;">User</th>
                             <th style="width: 10%; color: var(--text-muted); font-size: 0.75rem;">Model</th>
                             <th style="width: 25%; color: var(--text-muted); font-size: 0.75rem;">Prompt</th>
@@ -719,7 +887,9 @@
 
         function setLayerPill(layer, state) {
             const pill = document.getElementById(`lp-${layer}`);
-            if (pill) { pill.className = 'layer-pill ' + state; }
+            if (!pill) return;
+            if (state) verifyState.layerStatus[layer] = state;
+            pill.className = 'layer-pill ' + (state || '');
         }
 
         function resetModules() {
@@ -751,8 +921,14 @@
             }
 
             // Layer pills
-            for (let l = data.start_layer; l < data.layer; l++) setLayerPill(l, 'done');
-            setLayerPill(data.layer, 'active');
+            for (let l = data.start_layer; l < data.layer; l++) {
+                if (verifyState.layerStatus[l] !== 'failed') {
+                    setLayerPill(l, 'done');
+                }
+            }
+            if (verifyState.layerStatus[data.layer] !== 'failed') {
+                setLayerPill(data.layer, 'active');
+            }
         }
 
         function addResult(data) {
@@ -796,11 +972,27 @@
                 const pct = document.getElementById('tracker-pct');
                 if (pct && data.success) pct.textContent = '100%';
             }
-            // Mark last layer done if success
             if (data.success) {
+                // Mark all layers done if success.
                 MODULES.forEach(m => setModuleState(m.key, 'done'));
                 const pills = document.querySelectorAll('.layer-pill');
                 pills.forEach(p => p.className = 'layer-pill done');
+            } else {
+                // If failed, make current layer explicit and current module failed.
+                const layer = Number.isFinite(Number(verifyState.currentLayer)) ? verifyState.currentLayer : verifyState.startLayer;
+                setLayerPill(layer, 'failed');
+                if (Number.isFinite(Number(verifyState.currentModuleIdx)) && verifyState.currentModuleIdx >= 0 && verifyState.currentModuleIdx < MODULES.length) {
+                    setModuleState(MODULES[verifyState.currentModuleIdx].key, 'failed');
+                }
+            }
+
+            // Force immediate state refresh to avoid stale RUNNING badges on very fast runs.
+            if (typeof refreshLedgerNow === 'function') {
+                refreshLedgerNow({ syncVerifierState: true });
+                setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 300);
+                setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 1200);
+            } else if (typeof loadSessions === 'function') {
+                loadSessions();
             }
         }
 
@@ -812,22 +1004,26 @@
         window.updateTelemetry = function(sessions) {
             const verified = sessions.filter(s => s.verify_status === 'verified' || s.verify_status === 'passed');
             const failed   = sessions.filter(s => s.verify_status === 'failed');
-            const total    = verified.length + failed.length;
+            const finalizedRuns = verified.length + failed.length;
+            const totalRuns = sessions.reduce((acc, s) => {
+                const runs = Number(s.verify_runs);
+                if (Number.isFinite(runs) && runs > 0) return acc + runs;
+                const attempted = s.verify_status && s.verify_status !== 'pending';
+                return acc + (attempted ? 1 : 0);
+            }, 0);
 
-            const passRate = total > 0 ? Math.round(verified.length / total * 100) : 0;
+            const passRate = finalizedRuns > 0 ? Math.round(verified.length / finalizedRuns * 100) : 0;
             const lastDur  = verified.length > 0
                 ? parseFloat(verified[verified.length-1].verify_duration || 0)
                 : (failed.length > 0 ? parseFloat(failed[failed.length-1].verify_duration || 0) : 0);
 
             const el = id => document.getElementById(id);
-            if (el('t-sessions')) el('t-sessions').textContent = total || '0';
-            if (el('t-sessions-bar')) el('t-sessions-bar').style.width = `${Math.min(total * 5, 100)}%`;
+            if (el('t-runs')) el('t-runs').textContent = totalRuns || '0';
+            if (el('t-runs-bar')) el('t-runs-bar').style.width = `${Math.min(totalRuns * 4, 100)}%`;
             if (el('t-pass')) el('t-pass').textContent = passRate + '%';
             if (el('t-pass-bar')) el('t-pass-bar').style.width = `${passRate}%`;
             if (el('t-time')) el('t-time').textContent = lastDur > 0 ? `${lastDur}s` : '—';
             if (el('t-time-bar')) el('t-time-bar').style.width = `${Math.min(lastDur / 3, 100)}%`;
-            if (el('t-layers')) el('t-layers').textContent = total > 0 ? (total * 1).toString() : '—';
-            if (el('t-layers-bar')) el('t-layers-bar').style.width = `${Math.min(total * 3, 100)}%`;
         };
 
         document.addEventListener('DOMContentLoaded', () => {
@@ -838,6 +1034,7 @@
                     if (!document.getElementById('layer-pills').children.length) {
                         buildLayerPills(data.start_layer, data.end_layer);
                     }
+                    verifyState.currentModuleIdx = Number.isFinite(Number(data.module_idx)) ? Number(data.module_idx) : verifyState.currentModuleIdx;
                     // Reset results on layer change
                     if (data.layer !== verifyState.currentLayer) {
                         verifyState.currentLayer = data.layer;
@@ -849,7 +1046,9 @@
                 socket.on('verify_component', (data) => {
                     if (data.module_label) {
                         setModuleState(data.module, data.passed ? 'done' : 'failed');
-                        if (!data.passed) setLayerPill(data.layer, 'failed');
+                        if (!data.passed) {
+                            setLayerPill(data.layer, 'failed');
+                        }
                     }
                     addResult(data);
                 });

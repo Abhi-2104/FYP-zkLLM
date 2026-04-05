@@ -107,7 +107,7 @@ Backend runs: ./rmsnorm_v2 [args] or ./self-attn_v2 [args]
     ↓
 Progress updates sent via WebSocket
     ↓
-Proof saved to zkllm-workdir/Llama-2-7b/
+Proof saved to zkllm-workdir/Llama-2-7b/<session_id>/
     ↓
 "Verify" button enabled
 ```
@@ -192,7 +192,7 @@ kill -9 <PID>
 
 ### Verification button disabled:
 - Ensure proof was generated successfully
-- Check proof file exists in `zkllm-workdir/Llama-2-7b/`
+- Check proof file exists in `zkllm-workdir/Llama-2-7b/<session_id>/`
 - Reload the page to refresh status
 
 ---

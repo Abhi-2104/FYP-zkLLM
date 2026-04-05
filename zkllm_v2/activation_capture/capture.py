@@ -9,6 +9,7 @@ Coordinates the entire activation capture pipeline:
 """
 
 import torch
+import gc
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from pathlib import Path
 from typing import Optional
@@ -224,7 +225,8 @@ class ActivationCaptureManager:
         self, 
         text: str,
         output_dir: str = "temp-files",  # Changed default to match zkLLM
-        num_layers: Optional[int] = None
+        num_layers: Optional[int] = None,
+        max_seq_len: Optional[int] = None
     ) -> dict:
         """
         Capture activations from custom input text.
@@ -233,6 +235,7 @@ class ActivationCaptureManager:
             text: Input prompt
             output_dir: Directory to save activations (default: temp-files/)
             num_layers: Number of layers to capture
+            max_seq_len: Optional max token length for truncation
         
         Returns:
             Results dictionary with metadata
@@ -253,12 +256,18 @@ class ActivationCaptureManager:
         
         # Determine device for inputs
         device = next(self.model.parameters()).device
-        inputs = self.tokenizer(text, return_tensors="pt").to(device)
+        tok_kwargs = {"return_tensors": "pt"}
+        if max_seq_len is not None and max_seq_len > 0:
+            tok_kwargs["truncation"] = True
+            tok_kwargs["max_length"] = int(max_seq_len)
+        inputs = self.tokenizer(text, **tok_kwargs).to(device)
         seq_len = inputs.input_ids.shape[1]
         token_ids = inputs.input_ids[0].tolist()
         
         if self.verbose:
             print(f"Tokens ({seq_len}): {token_ids}")
+            if max_seq_len is not None and max_seq_len > 0:
+                print(f"Max seq len setting: {max_seq_len}")
             decoded_tokens = [self.tokenizer.decode([tid]) for tid in token_ids]
             print(f"Decoded: {decoded_tokens}\n")
         
@@ -268,10 +277,9 @@ class ActivationCaptureManager:
             if device.type == 'cpu':
                 print("⚠ Running on CPU - this may take several minutes...")
         
-        # Clear cache before forward pass to maximize free contiguous VRAM
+        # Clear cache before forward pass.
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.synchronize()
             
         import time
         start_time = time.time()
@@ -279,9 +287,6 @@ class ActivationCaptureManager:
         try:
             with torch.no_grad():
                 outputs = self.model(**inputs)
-                # Wait for completion to ensure OOM isn't deferred
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
         except torch.cuda.OutOfMemoryError as e:
             if self.verbose:
                 print(f"\n✗ CUDA OUT OF MEMORY during forward pass")
@@ -300,8 +305,8 @@ class ActivationCaptureManager:
         
         # Explicit cleanup of large tensors
         del inputs
-        outputs_logits = outputs.logits # keep logits for argmax but maybe del outputs if large
         del outputs
+        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
@@ -329,9 +334,14 @@ class ActivationCaptureManager:
         # Save activations
         saved_count = self.serializer.save_batch(activations, output_dir)
         
-        # Cleanup
+        # Cleanup hooks only
         self.hook_manager.remove_all_hooks()
         self.hook_manager.clear_activations()
+        
+        # NOTE: We skip explicit 'del self.model' here because this manager is 
+        # typically used in a standalone subprocess. Explicit deletion can 
+        # sometimes trigger segfaults in bitsandbytes/CUDA destructors 
+        # during process exit. The OS will reclaim all VRAM/RAM on exit.
         
         result = {
             'input_text': text,

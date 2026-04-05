@@ -12,7 +12,6 @@ import os, subprocess, json, threading, time, re, sqlite3, random, datetime as _
 from functools import wraps
 from pathlib import Path
 
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'verifai-secret-2026'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -89,6 +88,32 @@ def init_db():
                 conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {ctype} DEFAULT NULL")
             except sqlite3.OperationalError:
                 pass
+        
+            # Store model response for conversation playback
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN response TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+        # Track how many times verification has been triggered for each session.
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN verify_runs INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("UPDATE sessions SET verify_runs = 0 WHERE verify_runs IS NULL")
+        except sqlite3.OperationalError:
+            pass
+
+        # Persist verifier telemetry for post-run audit inspection in UI.
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN verify_log TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN verify_audit TEXT")
+        except sqlite3.OperationalError:
+            pass
 
 init_db()
 
@@ -124,6 +149,8 @@ def get_optimized_env():
     # Ensure subprocesses don't over-subscribe CPU threads during ZKP
     env["OMP_NUM_THREADS"] = "4" 
     env["MKL_NUM_THREADS"] = "4"
+    # Favor managed memory for very large CUDA allocations when needed
+    env.setdefault("ZKLLM_MANAGED_THRESHOLD_MB", "2048")
     return env
 
 def get_user_by_username(username):
@@ -351,8 +378,12 @@ def verifier():
 # ---------------------------------------------------------------------------
 @app.route('/api/models')
 def api_models():
+    available = []
+    for m in MODELS.values():
+        available.append(dict(m))
+        
     return jsonify({
-        "available_models": list(MODELS.values()),
+        "available_models": available,
         "selected_model": state.get("selected_model", "llama-2-7b")
     })
 
@@ -408,7 +439,8 @@ def api_provider_activity():
         # In a real system, we'd filter by models owned by the provider.
         # Here we show all sessions but hide non-relevant info.
         cursor = conn.execute("""
-            SELECT s.id, u.username, s.model_id, s.timestamp, s.inference_status 
+            SELECT s.id, u.username, s.model_id, s.timestamp, s.inference_status,
+                   s.proof_status, s.verify_status, s.proof_duration, s.verify_duration
             FROM sessions s 
             JOIN users u ON s.user_id = u.id 
             ORDER BY s.id DESC
@@ -465,22 +497,6 @@ def api_prompt():
     model_size = 13 if "13b" in selected_model_id.lower() else 7
     seq = model_info["seq_len"]
     
-    # Run the activation capture script
-    # Optimization: 7B fits in 6.1GB VRAM with 4-bit, so don't force --cpu for it.
-    # 13B still needs the --cpu flag (or better, hybrid balancing in capture.py).
-    cmd = [
-        PYTHON_EXE, str(BASE_DIR / "capture_activations.py"),
-        "--text", prompt,
-        "--model_size", str(model_size),
-    ]
-    if model_size > 7:
-        cmd.append("--cpu")  # Still force CPU for 13B on 6GB card to prevent hard OOM
-    
-    # Check if we should allow quantization (default True in capture.py)
-    # We remove --cpu for 7B to let it use the GPU's fast NF4 quantization.
-
-
-    # Log session to database
     request_verify = data.get('request_verify', False)
     user_id = session.get('user_id')
     with get_db_conn() as conn:
@@ -492,6 +508,21 @@ def api_prompt():
         session_id = cur.lastrowid
         conn.commit()
     state["current_session_id"] = session_id
+    
+    # Run the activation capture script
+    cmd = [
+        PYTHON_EXE, str(BASE_DIR / "capture_activations.py"),
+        "--text", prompt,
+        "--model_size", str(model_size),
+        "--output_dir", str(ACT_DIR / str(session_id)),
+        "--max_seq_len", str(seq)
+    ]
+    if model_size > 7:
+        cmd.append("--cpu")  # Still force CPU for 13B on 6GB card to prevent hard OOM
+
+
+
+
     
     try:
         # Launch background inference
@@ -557,8 +588,8 @@ def run_inference_task(sid, cmd, username):
             resp_text = f"[Inference complete.]\n\nPredicted next token: {pred_token}"
             with get_db_conn() as conn:
                 conn.execute(
-                    "UPDATE sessions SET inference_status = 'completed' WHERE id = ?", 
-                    (sid,)
+                        "UPDATE sessions SET inference_status = 'completed', response = ? WHERE id = ?",
+                        (resp_text, sid)
                 )
             
             # C2PA Signing Hook
@@ -590,9 +621,13 @@ def run_inference_task(sid, cmd, username):
                 "response": resp_text
             })
         else:
+            # Unmask true tracebacks from stdout/stderr piped buffers
+            raw_logs = state["inference_job"].get("log", [])
+            last_err = raw_logs[-1] if raw_logs else f"RC: {proc.returncode}"
+            err_msg = f"Process crashed (likely OOM). Reason: {str(last_err)}"
             with get_db_conn() as conn:
-                conn.execute("UPDATE sessions SET inference_status = 'failed' WHERE id = ?", (sid,))
-            socketio.emit("inference_complete", {"sid": sid, "success": False, "error": "Process crashed (likely OOM)"})
+                conn.execute("UPDATE sessions SET inference_status = 'failed', response = ? WHERE id = ?", (err_msg, sid))
+            socketio.emit("inference_complete", {"sid": sid, "success": False, "error": err_msg})
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -606,14 +641,51 @@ def api_session_detail(id):
     with get_db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        if session.get('role') in ['verifier', 'master']:
-            cur.execute("SELECT * FROM sessions WHERE id = ?", (id,))
+        # Avoid returning binary blobs (e.g., c2pa_receipt) which are not JSON-serializable.
+        schema = conn.execute("PRAGMA table_info(sessions)").fetchall()
+        available = {row[1] for row in schema}
+        wanted = [
+            'id', 'user_id', 'prompt', 'response', 'model_id', 'request_verify',
+            'inference_status', 'proof_status', 'verify_status', 'timestamp',
+            'proof_duration', 'verify_duration', 'verify_runs', 'verify_log', 'verify_audit',
+            'c2pa_status', 'c2pa_manifest'
+        ]
+        selected = [c for c in wanted if c in available]
+        cols = ", ".join(selected) if selected else "id, prompt, model_id, inference_status, proof_status, verify_status, timestamp"
+
+        if session.get('role') in ['verifier', 'master', 'provider']:
+            cur.execute(f"SELECT {cols} FROM sessions WHERE id = ?", (id,))
         else:
-            cur.execute("SELECT * FROM sessions WHERE id = ? AND user_id = ?", (id, session.get('user_id')))
+            cur.execute(f"SELECT {cols} FROM sessions WHERE id = ? AND user_id = ?", (id, session.get('user_id')))
         row = cur.fetchone()
         if not row:
             return jsonify({"error": "Session not found"}), 404
-        return jsonify(dict(row))
+        payload = dict(row)
+        payload.setdefault('response', None)
+
+        # Attach username for richer metadata display in session details popup.
+        uid = payload.get('user_id')
+        if uid is not None:
+            urow = conn.execute("SELECT username FROM users WHERE id = ?", (uid,)).fetchone()
+            if urow:
+                payload['username'] = urow['username'] if isinstance(urow, sqlite3.Row) else urow[0]
+
+        # Decode serialized JSON payloads where available.
+        for key in ('verify_log', 'verify_audit', 'c2pa_manifest'):
+            if key in payload and isinstance(payload[key], str) and payload[key].strip():
+                try:
+                    payload[key] = json.loads(payload[key])
+                except Exception:
+                    pass
+
+        # Fallback to current in-memory verifier buffers for the active/last run.
+        active_vjob = state.get("verify_job") or {}
+        if active_vjob.get("session_id") == id:
+            if not payload.get("verify_log"):
+                payload["verify_log"] = active_vjob.get("log", [])[-300:]
+            if not payload.get("verify_audit"):
+                payload["verify_audit"] = active_vjob.get("results", [])[-300:]
+        return jsonify(payload)
 
 @app.route('/api/sessions', methods=['GET'])
 @login_required()
@@ -632,7 +704,8 @@ def api_sessions():
             cur.execute("""
                 SELECT s.id, s.user_id, s.prompt, s.model_id, s.request_verify, 
                        s.inference_status, s.proof_status, s.verify_status, 
-                       s.timestamp, s.c2pa_status, s.c2pa_manifest, u.username 
+                       s.timestamp, s.c2pa_status, s.c2pa_manifest, u.username,
+                       s.proof_duration, s.verify_duration, s.verify_runs
                 FROM sessions s 
                 JOIN users u ON s.user_id = u.id 
                 WHERE s.user_id = ? 
@@ -654,7 +727,8 @@ def api_all_sessions():
         query = """
             SELECT s.id, s.user_id, s.prompt, s.model_id, s.request_verify, 
                    s.inference_status, s.proof_status, s.verify_status, 
-                   s.timestamp, s.c2pa_status, s.c2pa_manifest, u.username 
+                   s.timestamp, s.c2pa_status, s.c2pa_manifest, u.username,
+                   s.proof_duration, s.verify_duration, s.verify_runs
             FROM sessions s 
             LEFT JOIN users u ON s.user_id = u.id 
         """
@@ -715,6 +789,45 @@ def api_c2pa_inspect():
     result = _c2pa_inspect(data)
     return jsonify(result)
 
+@app.route('/api/c2pa/verify_match/<int:session_id>', methods=['POST'])
+@login_required()
+def api_c2pa_verify_match(session_id):
+    """Upload a receipt and verify it against a specific session's ledger manifest."""
+    uploaded = request.files.get("file")
+    if not uploaded or uploaded.filename == "":
+        return jsonify({"error": "No file uploaded"}), 400
+    
+    data = uploaded.read()
+    uploaded_manifest = _c2pa_inspect(data)
+    
+    if "error" in uploaded_manifest:
+        return jsonify(uploaded_manifest), 400
+        
+    with get_db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT c2pa_manifest FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        
+    if not row or not row['c2pa_manifest']:
+        return jsonify({"error": "No C2PA manifest found for this session ID"}), 404
+        
+    import json
+    try:
+        db_manifest = json.loads(row['c2pa_manifest'])
+    except Exception:
+        db_manifest = {}
+        
+    # Determine if they match (in real world, requires deep cryptographic payload dict diff)
+    is_match = (uploaded_manifest.get('claim_generator') == db_manifest.get('claim_generator') and 
+                uploaded_manifest.get('model_id') == db_manifest.get('model_id') and
+                uploaded_manifest.get('prompt') == db_manifest.get('prompt'))
+                
+    return jsonify({
+        "success": True,
+        "match": is_match,
+        "uploaded_manifest": uploaded_manifest,
+        "database_manifest": db_manifest
+    })
+
 # ---------------------------------------------------------------------------
 # API — Proof generation (master script)
 # ---------------------------------------------------------------------------
@@ -750,6 +863,10 @@ def api_proof_start():
         end = int(data.get("end_layer", layers_total - 1))
     except (ValueError, TypeError):
         end = int(model_info.get("layers", 32)) - 1
+
+    layers_total = int(model_info.get("layers", 32))
+    start = max(0, min(start, layers_total - 1))
+    end = max(start, min(end, layers_total - 1))
         
     model_size = data.get("model_size", model_info["size"])
     seq = data.get("seq_len", model_info["seq_len"])
@@ -757,7 +874,8 @@ def api_proof_start():
     state["proof_job"] = {
         "running": True, "progress": 0, "current_layer": start,
         "current_component": "", "total_layers": max(1, end - start + 1),
-        "log": [], "started_at": time.time(),
+        "start_layer": start, "end_layer": end,
+        "log": [], "started_at": time.time(), "success": None,
         "session_id": sid
     }
     state["verify_results"] = []
@@ -775,11 +893,14 @@ def api_proof_start():
             "--start_layer", str(start),
             "--end_layer", str(end),
             "--model_card", str(model_info.get("card", f"meta-llama/Llama-2-{model_size}b-hf")),
+            "--act_dir", str(ACT_DIR / str(sid))
         ]
+        if sid:
+            cmd += ["--run_id", str(sid)]
         
         # Add workdir if it exists in model_info
         if "workdir" in model_info:
-             cmd += ["--workdir", str(model_info["workdir"])]
+            cmd += ["--workdir", str(model_info["workdir"])]
 
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -810,8 +931,11 @@ def api_proof_start():
                 socketio.emit("proof_progress", {
                     "layer": state["proof_job"]["current_layer"],
                     "total": state["proof_job"]["total_layers"],
+                    "start_layer": state["proof_job"].get("start_layer", start),
+                    "end_layer": state["proof_job"].get("end_layer", end),
                     "component": comp,
                     "percent": state["proof_job"]["progress"],
+                    "session_id": state["proof_job"].get("session_id"),
                 })
 
             # Detect layer start (from "PROCESSING LAYER N")
@@ -830,12 +954,14 @@ def api_proof_start():
                     "layer": state["proof_job"]["current_layer"],
                     "component": state["proof_job"]["current_component"],
                     "success": True,
+                    "session_id": state["proof_job"].get("session_id"),
                 })
             elif "- FAILED" in line:
                 socketio.emit("proof_component_done", {
                     "layer": state["proof_job"]["current_layer"],
                     "component": state["proof_job"]["current_component"],
                     "success": False,
+                    "session_id": state["proof_job"].get("session_id"),
                 })
             
             # Yield to event loop to allow SocketIO to flush the emit buffer
@@ -844,22 +970,28 @@ def api_proof_start():
         proc.wait()
         state["proof_job"]["running"]  = False
         duration = time.time() - state["proof_job"]["started_at"]
-        state["proof_job"]["progress"] = 100 if proc.returncode == 0 else -1
+        success = proc.returncode == 0
+        state["proof_job"]["success"] = success
+        state["proof_job"]["progress"] = 100 if success else -1
         
         if sid:
             with get_db_conn() as conn:
+                status = "completed" if success else "failed"
                 conn.execute(
-                    "UPDATE sessions SET proof_status = 'completed', proof_duration = ? WHERE id = ?",
-                    (round(duration, 1), sid)
+                    "UPDATE sessions SET proof_status = ?, proof_duration = ? WHERE id = ?",
+                    (status, round(duration, 1), sid)
                 )
 
         socketio.emit("proof_complete", {
-            "success": proc.returncode == 0,
+            "success": success,
             "elapsed": round(duration, 1),
+            "start_layer": state["proof_job"].get("start_layer", start),
+            "end_layer": state["proof_job"].get("end_layer", end),
+            "session_id": state["proof_job"].get("session_id"),
         })
 
     threading.Thread(target=run, daemon=True).start()
-    return jsonify({"success": True, "message": "Proof generation started"})
+    return jsonify({"success": True, "message": "Proof generation started", "session_id": sid})
 
 @app.route('/api/proof/status')
 def api_proof_status():
@@ -871,6 +1003,11 @@ def api_proof_status():
         "progress": job["progress"],
         "current_layer": job.get("current_layer"),
         "current_component": job.get("current_component", ""),
+        "total_layers": job.get("total_layers"),
+        "start_layer": job.get("start_layer"),
+        "end_layer": job.get("end_layer"),
+        "success": job.get("success"),
+        "session_id": job.get("session_id"),
         "log_tail": job["log"][-100:],
         "elapsed": round(time.time() - job["started_at"], 1) if job["running"] else None,
     })
@@ -888,7 +1025,12 @@ def api_proof_stop(session_id=None):
                 proc.kill()
         state["proof_job"]["running"] = False
         state["proof_job"]["progress"] = -1
-        socketio.emit("proof_complete", {"success": False, "elapsed": 0.0})
+        state["proof_job"]["success"] = False
+        socketio.emit("proof_complete", {
+            "success": False,
+            "elapsed": 0.0,
+            "session_id": state["proof_job"].get("session_id")
+        })
         
         # Use URL-supplied session ID first, fall back to current_session_id
         sid = session_id or state.get("current_session_id")
@@ -912,6 +1054,10 @@ def api_verify_start():
     """Launch verify_proofs_v2.py in a background thread."""
     if state["verify_job"] and state["verify_job"].get("running"):
         return jsonify({"error": "verify job already running"}), 409
+
+    # Avoid concurrent proof/verify races that can cause nondeterministic verifier failures.
+    if state["proof_job"] and state["proof_job"].get("running"):
+        return jsonify({"error": "proof generation is still running; wait for completion before verification"}), 409
 
     data   = request.json or {}
     sid    = data.get("session_id") or state.get("current_session_id")
@@ -939,6 +1085,51 @@ def api_verify_start():
     except (ValueError, TypeError):
         end = int(model_info.get("layers", 32)) - 1
 
+    layers_total = int(model_info.get("layers", 32))
+    start = max(0, min(start, layers_total - 1))
+    end = max(start, min(end, layers_total - 1))
+
+    if sid:
+        with get_db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            srow = conn.execute(
+                "SELECT proof_status FROM sessions WHERE id = ?",
+                (sid,)
+            ).fetchone()
+        if not srow:
+            return jsonify({"error": f"session {sid} not found"}), 404
+        if srow["proof_status"] != "completed":
+            return jsonify({
+                "error": f"cannot verify session {sid}: proof_status is '{srow['proof_status']}', expected 'completed'"
+            }), 409
+
+    # Verify required proof artifacts exist for each selected layer before launching verifier.
+    base_workdir = Path(model_info.get("workdir", str(get_workdir(selected_model_id))))
+    proof_dir = (base_workdir / str(sid)) if sid else base_workdir
+    required_suffixes = [
+        "input-rmsnorm-proof.bin",
+        "self-attn-proof.bin",
+        "post-attn-rmsnorm-proof.bin",
+        "ffn-proof.bin",
+        "skip-proof.bin",
+    ]
+    missing = []
+    for layer in range(start, end + 1):
+        for suffix in required_suffixes:
+            p = proof_dir / f"layer-{layer}-{suffix}"
+            if not p.exists():
+                missing.append(str(p))
+                if len(missing) >= 5:
+                    break
+        if len(missing) >= 5:
+            break
+
+    if missing:
+        return jsonify({
+            "error": "verification artifacts missing; regenerate proofs for the selected layer range",
+            "missing_examples": missing
+        }), 409
+
     state["verify_job"] = {
         "running": True, "log": [], "results": [],
         "started_at": time.time(),
@@ -949,115 +1140,206 @@ def api_verify_start():
     if sid:
         state["current_session_id"] = sid
         with get_db_conn() as conn:
-            conn.execute("UPDATE sessions SET verify_status = 'running' WHERE id = ?", (sid,))
+            conn.execute(
+                "UPDATE sessions SET verify_status = 'running', verify_runs = COALESCE(verify_runs, 0) + 1, verify_log = NULL, verify_audit = NULL WHERE id = ?",
+                (sid,)
+            )
 
     def run():
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        model_size = model_info.get("size", 7)
-        seq_len    = model_info.get("seq_len", 128)
-        
-        cmd = [
-            PYTHON_EXE, "-u", str(BASE_DIR / "verify_proofs_v2.py"),
-            "--model_size",  str(model_size),
-            "--seq_len",     str(seq_len),
-            "--start_layer", str(start),
-            "--end_layer",   str(end),
-        ]
-        
-        if "workdir" in model_info:
-            cmd += ["--workdir", str(model_info["workdir"])]
+        proc = None
+        success = False
+        try:
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            model_size = model_info.get("size", 7)
+            seq_len    = model_info.get("seq_len", 128)
 
-        print(f"[verify cmd] {' '.join(cmd)}")
+            cmd = [
+                PYTHON_EXE, "-u", str(BASE_DIR / "verify_proofs_v2.py"),
+                "--model_size",  str(model_size),
+                "--seq_len",     str(seq_len),
+                "--start_layer", str(start),
+                "--end_layer",   str(end),
+                "--act_dir",     str(ACT_DIR / str(sid))
+            ]
+            if sid:
+                cmd += ["--run_id", str(sid)]
 
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, cwd=str(BASE_DIR), bufsize=1, env=get_optimized_env()
-        )
-        state["verify_job"]["process"] = proc
+            if "workdir" in model_info:
+                cmd += ["--workdir", str(model_info["workdir"])]
 
-        # Verification pipeline modules per layer (in order)
-        MODULES = ["input_rmsnorm", "self_attn", "post_attn_rmsnorm", "ffn", "skip_connection"]
-        MODULE_LABELS = {
-            "input_rmsnorm":    "Input RMSNorm",
-            "self_attn":        "Self-Attention",
-            "post_attn_rmsnorm":"Post-Attn RMSNorm",
-            "ffn":              "Feed-Forward (FFN)",
-            "skip_connection":  "Skip Connection",
-        }
-        total_layers = max(end - start + 1, 1)
-        _v_layer = [start]
-        _v_mod = [0]
+            print(f"[verify cmd] {' '.join(cmd)}")
 
-        def emit_verify_progress():
-            pct = int(((_v_layer[0] - start) * 5 + _v_mod[0]) / (total_layers * 5) * 100)
-            socketio.emit("verify_progress", {
-                "layer": _v_layer[0],
-                "total_layers": total_layers,
-                "start_layer": start,
-                "end_layer": end,
-                "module": MODULES[min(_v_mod[0], 4)],
-                "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
-                "module_idx": _v_mod[0],
-                "percent": min(pct, 99),
-            })
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, cwd=str(BASE_DIR), bufsize=1, env=get_optimized_env()
+            )
+            state["verify_job"]["process"] = proc
 
-        for line in proc.stdout:
-            line = line.rstrip()
-            state["verify_job"]["log"].append(line)
-            socketio.emit("verify_log", {"line": line})
+            # Verification pipeline modules per layer (in order)
+            MODULES = ["input_rmsnorm", "self_attn", "post_attn_rmsnorm", "ffn", "skip_connection"]
+            MODULE_LABELS = {
+                "input_rmsnorm":    "Input RMSNorm",
+                "self_attn":        "Self-Attention",
+                "post_attn_rmsnorm":"Post-Attn RMSNorm",
+                "ffn":              "Feed-Forward (FFN)",
+                "skip_connection":  "Skip Connection",
+            }
+            total_layers = max(end - start + 1, 1)
+            _v_layer = [start]
+            _v_mod = [0]
 
-            # Detect layer start — only match the explicit "VERIFYING LAYER N" header line
-            lm = re.search(r"VERIFYING LAYER (\d+)", line)
-            if lm:
-                _v_layer[0] = int(lm.group(1))
-                _v_mod[0] = 0
-                emit_verify_progress()
-
-            # Detect per-module step using [N/5] prefix (most reliable)
-            step_m = re.search(r"\[(\d+)/5\]", line)
-            if step_m:
-                step_num = int(step_m.group(1))
-                _v_mod[0] = step_num - 1  # [1/5] -> idx 0, [2/5] -> idx 1, etc.
-                emit_verify_progress()
-
-            # Detect per-component result — matches "✅ Layer N ... - SUCCESS" lines
-            passed = "✅" in line and "SUCCESS" in line.upper()
-            failed = ("❌" in line or ("FAILED" in line.upper() and "exit code" not in line.lower())) and not passed
-
-            if passed or failed:
-                socketio.emit("verify_component", {
-                    "line": line,
-                    "passed": passed,
+            def emit_verify_progress():
+                pct = int(((_v_layer[0] - start) * 5 + _v_mod[0]) / (total_layers * 5) * 100)
+                socketio.emit("verify_progress", {
                     "layer": _v_layer[0],
+                    "total_layers": total_layers,
+                    "start_layer": start,
+                    "end_layer": end,
                     "module": MODULES[min(_v_mod[0], 4)],
                     "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
+                    "module_idx": _v_mod[0],
+                    "percent": min(pct, 99),
                 })
-                if passed:
-                    _v_mod[0] = min(_v_mod[0] + 1, 4)
+
+            def infer_parameter(raw_line):
+                ll = raw_line.lower()
+                mapping = [
+                    ("q projection", "self_attn.q_proj"),
+                    ("k projection", "self_attn.k_proj"),
+                    ("v projection", "self_attn.v_proj"),
+                    ("o projection", "self_attn.o_proj"),
+                    ("q @ k", "self_attn.scores"),
+                    ("pooling", "self_attn.pooling"),
+                    ("softmax", "self_attn.softmax"),
+                    ("up projection", "mlp.up_proj"),
+                    ("gate projection", "mlp.gate_proj"),
+                    ("down projection", "mlp.down_proj"),
+                    ("swiglu", "mlp.swiglu"),
+                    ("hadamard", "rmsnorm.hadamard"),
+                    ("weight commitment", "weights.commitment"),
+                    ("rescaling", "rmsnorm.rescaling"),
+                    ("zero-check", "skip.zero_check"),
+                    ("sumcheck", "sumcheck.transcript"),
+                    ("claimed output", "claim.binding"),
+                ]
+                for needle, label in mapping:
+                    if needle in ll:
+                        return label
+                return None
+
+            def infer_level(raw_line):
+                ll = raw_line.lower()
+                if "❌" in raw_line or " failed" in ll or ll.startswith("error"):
+                    return "fail"
+                if "✅" in raw_line or " passed" in ll or " successful" in ll:
+                    return "pass"
+                if "⚠" in raw_line or "warning" in ll or "skipping" in ll or "bypassed" in ll:
+                    return "warn"
+                return "info"
+
+            for line in proc.stdout:
+                line = line.rstrip()
+                state["verify_job"]["log"].append(line)
+                socketio.emit("verify_log", {"line": line})
+
+                # Detect layer start — only match the explicit "VERIFYING LAYER N" header line
+                lm = re.search(r"VERIFYING LAYER (\d+)", line)
+                if lm:
+                    _v_layer[0] = int(lm.group(1))
+                    _v_mod[0] = 0
                     emit_verify_progress()
-            
-            # Yield to the event loop so Socket.IO can flush telemetry buffers
-            socketio.sleep(0)
 
-        proc.wait()
-        state["verify_job"]["running"] = False
-        duration = time.time() - state["verify_job"]["started_at"]
-        success = proc.returncode == 0
-        state["verify_job"]["success"] = success
-        
-        if sid:
-            with get_db_conn() as conn:
-                status = "verified" if success else "failed"
-                conn.execute(
-                    "UPDATE sessions SET verify_status = ?, verify_duration = ? WHERE id = ?",
-                    (status, round(duration, 1), sid)
-                )
+                # Detect per-module step using [N/5] prefix (most reliable)
+                step_m = re.search(r"\[(\d+)/5\]", line)
+                if step_m:
+                    step_num = int(step_m.group(1))
+                    _v_mod[0] = step_num - 1  # [1/5] -> idx 0, [2/5] -> idx 1, etc.
+                    emit_verify_progress()
 
-        socketio.emit("verify_complete", {
-            "success": success,
-            "elapsed": round(duration, 1),
-        })
+                # Capture structured verifier audit entries for modal inspection.
+                level = infer_level(line)
+                param = infer_parameter(line)
+                if level != "info" or param or line.startswith("Step "):
+                    state["verify_job"]["results"].append({
+                        "ts": round(time.time(), 3),
+                        "layer": _v_layer[0],
+                        "module": MODULES[min(_v_mod[0], 4)],
+                        "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
+                        "parameter": param,
+                        "status": level,
+                        "line": line,
+                    })
+                    if len(state["verify_job"]["results"]) > 1200:
+                        state["verify_job"]["results"] = state["verify_job"]["results"][-1200:]
+
+                # Detect per-component result — matches "✅ Layer N ... - SUCCESS" lines
+                passed = "✅" in line and "SUCCESS" in line.upper()
+                failed = ("❌" in line or ("FAILED" in line.upper() and "exit code" not in line.lower())) and not passed
+
+                if passed or failed:
+                    event_payload = {
+                        "line": line,
+                        "passed": passed,
+                        "layer": _v_layer[0],
+                        "module": MODULES[min(_v_mod[0], 4)],
+                        "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
+                    }
+                    socketio.emit("verify_component", event_payload)
+                    state["verify_job"]["results"].append({
+                        "ts": round(time.time(), 3),
+                        "layer": _v_layer[0],
+                        "module": MODULES[min(_v_mod[0], 4)],
+                        "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
+                        "parameter": infer_parameter(line),
+                        "status": "pass" if passed else "fail",
+                        "line": line,
+                    })
+                    if passed:
+                        _v_mod[0] = min(_v_mod[0] + 1, 4)
+                        emit_verify_progress()
+
+                # Yield to the event loop so Socket.IO can flush telemetry buffers
+                socketio.sleep(0)
+
+            proc.wait()
+            success = proc.returncode == 0
+        except Exception as e:
+            state["verify_job"]["log"].append(f"❌ Verifier runtime exception: {e}")
+            state["verify_job"]["results"].append({
+                "ts": round(time.time(), 3),
+                "layer": start,
+                "module": "verification",
+                "module_label": "Verification Runner",
+                "parameter": "runtime",
+                "status": "fail",
+                "line": f"Verifier runtime exception: {e}",
+            })
+            success = False
+        finally:
+            state["verify_job"]["running"] = False
+            duration = time.time() - state["verify_job"]["started_at"]
+            state["verify_job"]["success"] = success
+
+            if sid:
+                with get_db_conn() as conn:
+                    status = "verified" if success else "failed"
+                    conn.execute(
+                        "UPDATE sessions SET verify_status = ?, verify_duration = ?, verify_log = ?, verify_audit = ? WHERE id = ?",
+                        (
+                            status,
+                            round(duration, 1),
+                            json.dumps(state["verify_job"].get("log", [])[-1500:]),
+                            json.dumps(state["verify_job"].get("results", [])[-1500:]),
+                            sid,
+                        )
+                    )
+
+            socketio.emit("verify_complete", {
+                "success": success,
+                "elapsed": round(duration, 1),
+                "session_id": sid,
+            })
 
     threading.Thread(target=run, daemon=True).start()
     return jsonify({"success": True, "message": "Verification started"})
@@ -1079,7 +1361,14 @@ def api_verify_stop(session_id=None):
         sid = session_id or state.get("current_session_id")
         if sid:
             with get_db_conn() as conn:
-                conn.execute("UPDATE sessions SET verify_status = 'aborted' WHERE id = ?", (sid,))
+                conn.execute(
+                    "UPDATE sessions SET verify_status = 'aborted', verify_log = ?, verify_audit = ? WHERE id = ?",
+                    (
+                        json.dumps(state["verify_job"].get("log", [])[-1500:]),
+                        json.dumps(state["verify_job"].get("results", [])[-1500:]),
+                        sid,
+                    )
+                )
                 
         return jsonify({"success": True, "message": "Verification aborted"})
     return jsonify({"error": "No verify job running"}), 400

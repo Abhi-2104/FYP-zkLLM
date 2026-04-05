@@ -3,31 +3,38 @@
 
 #include "fr-tensor.cuh"
 #include "polynomial_v2.cuh"
+#include <array>
 #include <vector>
 
 // Polynomial exponential using Taylor series
 // exp(x) ≈ 1 + x + x²/2! + x³/3! + ... + x^n/n!
 // Returns the exponential value in the field
 Fr_t poly_exp(const Fr_t& x, int terms = 10) {
-    // Precomputed factorials as field elements
+    // Precomputed factorial inverses (1 / i!) cached once to avoid per-element inversions.
     static const uint factorials[] = {
         1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800, 39916800
     };
-    
+    static const std::array<Fr_t, 12> factorial_invs = [] {
+        std::array<Fr_t, 12> invs{};
+        invs[0] = {1, 0, 0, 0, 0, 0, 0, 0};
+        invs[1] = {1, 0, 0, 0, 0, 0, 0, 0};
+        for (int i = 2; i < 12; ++i) {
+            Fr_t f = {factorials[i], 0, 0, 0, 0, 0, 0, 0};
+            invs[i] = inv(f);
+        }
+        return invs;
+    }();
+
     Fr_t result = {1, 0, 0, 0, 0, 0, 0, 0};  // Start with 1
     Fr_t x_power = {1, 0, 0, 0, 0, 0, 0, 0};  // x^0 = 1
-    
-    for (int i = 1; i <= terms && i < 12; i++) {
+
+    const int max_terms = (terms < 11) ? terms : 11;
+    for (int i = 1; i <= max_terms; i++) {
         x_power = x_power * x;  // x^i
-        
-        // Create field element for factorial
-        Fr_t factorial_inv = {factorials[i], 0, 0, 0, 0, 0, 0, 0};
-        factorial_inv = inv(factorial_inv);  // 1/i!
-        
-        Fr_t term = x_power * factorial_inv;  // x^i / i!
+        Fr_t term = x_power * factorial_invs[i];  // x^i / i!
         result = result + term;
     }
-    
+
     return result;
 }
 

@@ -74,8 +74,7 @@ void save_rmsnorm_proof(const RMSNormProof& proof, const std::string& filename) 
     out.write(reinterpret_cast<const char*>(&v_size), sizeof(v_size));
     out.write(reinterpret_cast<const char*>(proof.random_v.data()), v_size * sizeof(Fr_t));
 
-    // Save claimed inputs and outputs
-    out.write(reinterpret_cast<const char*>(&proof.claimed_input), sizeof(Fr_t));
+    // Save claimed output
     out.write(reinterpret_cast<const char*>(&proof.claimed_output), sizeof(Fr_t));
 }
 
@@ -110,8 +109,7 @@ RMSNormProof load_rmsnorm_proof(const std::string& filename) {
         proof.random_v.resize(v_size);
         in.read(reinterpret_cast<char*>(proof.random_v.data()), v_size * sizeof(Fr_t));
 
-        // Load claimed inputs and outputs
-        in.read(reinterpret_cast<char*>(&proof.claimed_input), sizeof(Fr_t));
+        // Load claimed output
         in.read(reinterpret_cast<char*>(&proof.claimed_output), sizeof(Fr_t));
     }
 
@@ -658,7 +656,7 @@ void save_skip_connection_proof(const SkipConnectionProof& proof, const std::str
     out.write(reinterpret_cast<const char*>(&u_size), sizeof(uint64_t));
     out.write(reinterpret_cast<const char*>(proof.random_u.data()), u_size * sizeof(Fr_t));
 
-    // Save claimed inputs
+    // Save claimed input evaluations
     out.write(reinterpret_cast<const char*>(&proof.claimed_input_a), sizeof(Fr_t));
     out.write(reinterpret_cast<const char*>(&proof.claimed_input_b), sizeof(Fr_t));
 
@@ -692,12 +690,28 @@ SkipConnectionProof load_skip_connection_proof(const std::string& filename) {
     proof.random_u.resize(u_size);
     in.read(reinterpret_cast<char*>(proof.random_u.data()), u_size * sizeof(Fr_t));
 
-    // Load claimed inputs
-    in.read(reinterpret_cast<char*>(&proof.claimed_input_a), sizeof(Fr_t));
-    in.read(reinterpret_cast<char*>(&proof.claimed_input_b), sizeof(Fr_t));
+    // Load claimed input/output (backward compatible with older format)
+    std::streampos pos = in.tellg();
+    in.seekg(0, std::ios::end);
+    std::streampos end = in.tellg();
+    in.seekg(pos);
+    std::streamsize remaining = end - pos;
 
-    // Load claimed output
-    in.read(reinterpret_cast<char*>(&proof.claimed_output), sizeof(Fr_t));
+    if (remaining >= static_cast<std::streamsize>(3 * sizeof(Fr_t))) {
+        in.read(reinterpret_cast<char*>(&proof.claimed_input_a), sizeof(Fr_t));
+        in.read(reinterpret_cast<char*>(&proof.claimed_input_b), sizeof(Fr_t));
+        in.read(reinterpret_cast<char*>(&proof.claimed_output), sizeof(Fr_t));
+    } else if (remaining >= static_cast<std::streamsize>(sizeof(Fr_t))) {
+        proof.claimed_input_a = Fr_t{};
+        proof.claimed_input_b = Fr_t{};
+        in.read(reinterpret_cast<char*>(&proof.claimed_output), sizeof(Fr_t));
+        proof.random_u.clear();
+    } else {
+        proof.claimed_input_a = Fr_t{};
+        proof.claimed_input_b = Fr_t{};
+        proof.claimed_output = Fr_t{};
+        proof.random_u.clear();
+    }
 
     in.close();
     return proof;

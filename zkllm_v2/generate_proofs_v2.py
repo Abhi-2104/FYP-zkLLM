@@ -18,38 +18,116 @@ import sys
 import subprocess
 import time
 import argparse
+import shutil
 from pathlib import Path
 
 
 class ZkLLMProofGeneratorV2:
-    def __init__(self, model_size=7, device='cpu', start_layer=0, end_layer=31, seq_len=128):
+    def __init__(
+        self,
+        model_size=7,
+        device='cpu',
+        start_layer=0,
+        end_layer=31,
+        seq_len=128,
+        act_dir=None,
+        workdir=None,
+        run_id=None,
+        model_card=None
+    ):
         self.model_size = model_size
         self.device = device
         self.start_layer = start_layer
         self.end_layer = end_layer
         self.seq_len = seq_len
+        self.model_card = model_card
         
         # Setup workdir
         model_name = "Llama-2-7b" if model_size == 7 else "Llama-2-13b"
-        self.workdir = Path(f"./zkllm-workdir/{model_name}")
+        self.base_workdir = Path(workdir) if workdir else Path(f"./zkllm-workdir/{model_name}")
+        self.run_id = str(run_id) if run_id is not None else None
+        self.workdir = self.base_workdir / self.run_id if self.run_id else self.base_workdir
         self.workdir.mkdir(parents=True, exist_ok=True)
-        self.activation_dir = Path("./activations")
-        self.activation_dir.mkdir(exist_ok=True)
+        if act_dir:
+            self.activation_dir = Path(act_dir)
+        elif self.run_id:
+            self.activation_dir = Path("./activations") / self.run_id
+        else:
+            self.activation_dir = Path("./activations")
+        self.activation_dir.mkdir(parents=True, exist_ok=True)
         
         # Track results
         self.results = {}
         
+        # Ensure base artifacts are visible in the session workdir
+        self._ensure_common_links()
+        self._ensure_required_weight_links()
+        
         # Load model once and extract all parameters
         self._load_model_params()
     
+    def _link_from_base(self, relative_path):
+        if self.base_workdir == self.workdir:
+            return
+        src = self.base_workdir / relative_path
+        dest = self.workdir / relative_path
+        if dest.exists() or not src.exists():
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(src, dest)
+        except OSError:
+            shutil.copy2(src, dest)
+
+    def _ensure_common_links(self):
+        self._link_from_base("config.json")
+        common_files = [
+            "input_layernorm.weight-pp.bin",
+            "post_attention_layernorm.weight-pp.bin",
+            "self_attn.q_proj.weight-pp.bin",
+            "self_attn.k_proj.weight-pp.bin",
+            "self_attn.v_proj.weight-pp.bin",
+            "self_attn.o_proj.weight-pp.bin",
+            "mlp.gate_proj.weight-pp.bin",
+            "mlp.up_proj.weight-pp.bin",
+            "mlp.down_proj.weight-pp.bin",
+        ]
+        for fname in common_files:
+            self._link_from_base(fname)
+
+    def _ensure_layer_links(self, layer):
+        self._ensure_common_links()
+        layer_prefix = f"layer-{layer}"
+        names = [
+            "input_layernorm.weight",
+            "post_attention_layernorm.weight",
+            "self_attn.q_proj.weight",
+            "self_attn.k_proj.weight",
+            "self_attn.v_proj.weight",
+            "self_attn.o_proj.weight",
+            "mlp.gate_proj.weight",
+            "mlp.up_proj.weight",
+            "mlp.down_proj.weight",
+        ]
+        for name in names:
+            self._link_from_base(f"{layer_prefix}-{name}-int.bin")
+            self._link_from_base(f"{layer_prefix}-{name}-commitment.bin")
+
+    def _ensure_required_weight_links(self):
+        for i in range(self.start_layer, self.end_layer + 1):
+            self._link_from_base(f"layer-{i}-self_attn.q_proj.weight-int.bin")
+            self._link_from_base(f"layer-{i}-mlp.up_proj.weight-int.bin")
+            self._link_from_base(f"layer-{i}-input_layernorm.weight-int.bin")
+
     def _load_model_params(self):
         """Load model once and extract parameters needed for proof generation"""
         self.layer_input_eps = {}
         self.layer_post_attn_eps = {}
         
-        # 0. Try to load from cache first
+        # 0. Try to load config cache first
         import json
         config_cache = self.workdir / "config.json"
+        cache_loaded = False
         if config_cache.exists():
             with open(config_cache, 'r') as f:
                 cache_data = json.load(f)
@@ -59,87 +137,70 @@ class ZkLLMProofGeneratorV2:
                 self.variance_epsilon = cache_data.get('variance_epsilon', 1e-5)
                 self.layer_input_eps = {int(k): v for k, v in cache_data.get('layer_input_eps', {}).items()}
                 self.layer_post_attn_eps = {int(k): v for k, v in cache_data.get('layer_post_attn_eps', {}).items()}
-        
-        # 1. Check if we actually need to load the model
-        needs_loading = False
-        target_layers = range(self.start_layer, self.end_layer + 1)
-        for i in target_layers:
-            w_prefix = f"{self.workdir}/layer-{i}"
-            required = [
-                f"{w_prefix}-self_attn.q_proj.weight-int.bin",
-                f"{w_prefix}-mlp.up_proj.weight-int.bin",
-                f"{w_prefix}-input_layernorm.weight-int.bin"
-            ]
-            if not all(os.path.exists(f) for f in required):
-                needs_loading = True
-                break
-        
-        if not needs_loading and hasattr(self, 'embed_dim'):
-            print(f"  All required weights for layers {self.start_layer}-{self.end_layer} found. Skipping model load.")
-            return
+                cache_loaded = all([
+                    self.embed_dim is not None,
+                    self.hidden_dim is not None,
+                    self.num_heads is not None,
+                ])
 
-        # 2. Extract and save weights ONLY for requested layers to avoid OOM on 13B
+        # Auto-detect real sequence length from capture output if available
+        sample_file = self.activation_dir / "layer-0-block-input.bin"
+        embed_dim = getattr(self, "embed_dim", None)
+        if embed_dim is None:
+            embed_dim = 4096 if self.model_size == 7 else 5120
+        if sample_file.exists() and embed_dim:
+            size_bytes = sample_file.stat().st_size
+            num_floats = size_bytes // 4
+            detected_seq_len = num_floats // embed_dim
+            if detected_seq_len > 0:
+                if detected_seq_len < self.seq_len:
+                    self.seq_len = detected_seq_len
+                    print(f"  Auto-adjusted seq_len down to {self.seq_len} tokens based on captured activations.\n")
+                elif detected_seq_len > self.seq_len:
+                    print(
+                        f"  Captured activations have {detected_seq_len} tokens; "
+                        f"keeping configured proof seq_len={self.seq_len}."
+                    )
+        
+        # 1. Load model metadata (old v2 behavior) and avoid rewriting layer weights.
         from transformers import AutoModelForCausalLM
-        import fileio_utils
         import gc
         
-        # Determine layers to process
-        target_layers = range(self.start_layer, self.end_layer + 1)
         # Try to resolve exact snapshot to bypass network
-        cache_path = Path("./model-storage") / f"models--meta-llama--Llama-2-{self.model_size}b-hf"
-        if cache_path.exists():
-            snapshots_dir = cache_path / "snapshots"
-            if snapshots_dir.exists() and any(snapshots_dir.iterdir()):
-                model_card_path = str(next(snapshots_dir.iterdir()))
+        model_card_path = self.model_card
+        if not model_card_path:
+            cache_path = Path("./model-storage") / f"models--meta-llama--Llama-2-{self.model_size}b-hf"
+            if cache_path.exists():
+                snapshots_dir = cache_path / "snapshots"
+                if snapshots_dir.exists() and any(snapshots_dir.iterdir()):
+                    model_card_path = str(next(snapshots_dir.iterdir()))
+                else:
+                    model_card_path = f"meta-llama/Llama-2-{self.model_size}b-hf"
             else:
                 model_card_path = f"meta-llama/Llama-2-{self.model_size}b-hf"
-        else:
-            model_card_path = f"meta-llama/Llama-2-{self.model_size}b-hf"
 
-        print(f"\nLoading model {model_card_path} to extract parameters...")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_card_path, local_files_only=True, cache_dir="./model-storage"
-        )
-        
-        layer0 = model.model.layers[0]
-        (self.embed_dim,) = layer0.input_layernorm.weight.shape
-        self.variance_epsilon = getattr(model.config, "rms_norm_eps", 1e-6)
-        self.hidden_dim = layer0.mlp.up_proj.out_features
-        self.num_heads = model.config.num_attention_heads
-        
-        print(f"  Selective extraction: Saving weights for layers {self.start_layer} to {self.end_layer} to {self.workdir}...")
-        
-        for i, layer in enumerate(model.model.layers):
-            self.layer_input_eps[i] = layer.input_layernorm.variance_epsilon
-            self.layer_post_attn_eps[i] = layer.post_attention_layernorm.variance_epsilon
-            
-            if i in target_layers:
-                # Save weights (only if missing to save time)
-                w_prefix = f"{self.workdir}/layer-{i}"
-                
-                # RMSNorm Weights
-                if not os.path.exists(f"{w_prefix}-input_layernorm.weight-int.bin"):
-                    fileio_utils.save_int(layer.input_layernorm.weight, 1<<16, f"{w_prefix}-input_layernorm.weight-int.bin")
-                if not os.path.exists(f"{w_prefix}-post_attention_layernorm.weight-int.bin"):
-                    fileio_utils.save_int(layer.post_attention_layernorm.weight, 1<<16, f"{w_prefix}-post_attention_layernorm.weight-int.bin")
-                
-                # Self-Attention Weights
-                if not os.path.exists(f"{w_prefix}-self_attn.q_proj.weight-int.bin"):
-                    fileio_utils.save_int(layer.self_attn.q_proj.weight, 1<<16, f"{w_prefix}-self_attn.q_proj.weight-int.bin")
-                    fileio_utils.save_int(layer.self_attn.k_proj.weight, 1<<16, f"{w_prefix}-self_attn.k_proj.weight-int.bin")
-                    fileio_utils.save_int(layer.self_attn.v_proj.weight, 1<<16, f"{w_prefix}-self_attn.v_proj.weight-int.bin")
-                    fileio_utils.save_int(layer.self_attn.o_proj.weight, 1<<16, f"{w_prefix}-self_attn.o_proj.weight-int.bin")
-                
-                # FFN Weights
-                if not os.path.exists(f"{w_prefix}-mlp.gate_proj.weight-int.bin"):
-                    fileio_utils.save_int(layer.mlp.gate_proj.weight, 1<<16, f"{w_prefix}-mlp.gate_proj.weight-int.bin")
-                if not os.path.exists(f"{w_prefix}-mlp.up_proj.weight-int.bin"):
-                    fileio_utils.save_int(layer.mlp.up_proj.weight, 1<<16, f"{w_prefix}-mlp.up_proj.weight-int.bin")
-                if not os.path.exists(f"{w_prefix}-mlp.down_proj.weight-int.bin"):
-                    fileio_utils.save_int(layer.mlp.down_proj.weight, 1<<16, f"{w_prefix}-mlp.down_proj.weight-int.bin")
-                
-                # Help GC
-                gc.collect()
+        model = None
+        model_loaded = False
+        try:
+            print(f"\nLoading model {model_card_path} for metadata...")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_card_path, local_files_only=True, cache_dir="./model-storage"
+            )
+            model_loaded = True
+
+            layer0 = model.model.layers[0]
+            (self.embed_dim,) = layer0.input_layernorm.weight.shape
+            self.variance_epsilon = getattr(model.config, "rms_norm_eps", 1e-6)
+            self.hidden_dim = layer0.mlp.up_proj.out_features
+            self.num_heads = model.config.num_attention_heads
+
+            for i, layer in enumerate(model.model.layers):
+                self.layer_input_eps[i] = layer.input_layernorm.variance_epsilon
+                self.layer_post_attn_eps[i] = layer.post_attention_layernorm.variance_epsilon
+        except Exception as e:
+            if not cache_loaded:
+                raise RuntimeError(f"Failed to load model metadata and no cache was available: {e}")
+            print(f"  Warning: failed to load model metadata, using cached config instead ({e})")
 
         # Cache config
         with open(config_cache, 'w') as f:
@@ -152,21 +213,23 @@ class ZkLLMProofGeneratorV2:
                 'layer_post_attn_eps': self.layer_post_attn_eps
             }, f)
 
-        del model
+        if model is not None:
+            del model
         gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
         
-        print(f"  embed_dim={self.embed_dim}, hidden_dim={self.hidden_dim}, heads={self.num_heads}")
-        print(f"  Model unloaded from memory.\n")
+        source = "model" if model_loaded else "cache"
+        print(f"  embed_dim={self.embed_dim}, hidden_dim={self.hidden_dim}, heads={self.num_heads} (from {source})")
+        print(f"  Model metadata phase completed.\n")
         
-        # Auto-detect real sequence length from capture output if available
-        sample_file = self.activation_dir / "layer-0-block-input.bin"
-        if sample_file.exists():
-            size_bytes = sample_file.stat().st_size
-            num_floats = size_bytes // 4
-            detected_seq_len = num_floats // self.embed_dim
-            if detected_seq_len > 0:
-                self.seq_len = detected_seq_len
-                print(f"  Auto-detected seq_len = {self.seq_len} tokens from captured activations.\n")
+        # Sequence length already auto-detected above if activations are present
     
     def run_command(self, cmd, description=""):
         """Run a command and handle errors"""
@@ -185,6 +248,21 @@ class ZkLLMProofGeneratorV2:
         except FileNotFoundError as e:
             print(f"❌ {description} - FAILED (command not found: {e})")
             return False
+        finally:
+            self._python_gpu_cleanup()
+
+    def _python_gpu_cleanup(self):
+        """Best-effort cleanup between component runs to keep memory pressure low."""
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
     
     def generate_input_rmsnorm(self, layer):
         """
@@ -204,6 +282,7 @@ class ZkLLMProofGeneratorV2:
             str(self.model_size), str(layer), 'input', str(self.seq_len),
             '--input_file', str(input_file),
             '--output_file', str(output_file),
+            '--workdir', str(self.workdir),
             '--precomputed',
             '--embed_dim', str(self.embed_dim),
             '--variance_epsilon', str(eps)
@@ -226,6 +305,7 @@ class ZkLLMProofGeneratorV2:
             str(self.model_size), str(layer), str(self.seq_len),
             '--input_file', str(input_file),
             '--output_file', str(output_file),
+            '--workdir', str(self.workdir),
             '--precomputed',
             '--embed_dim', str(self.embed_dim),
             '--num_heads', str(self.num_heads)
@@ -252,6 +332,7 @@ class ZkLLMProofGeneratorV2:
             str(self.model_size), str(layer), 'post_attention', str(self.seq_len),
             '--input_file', str(input_file),
             '--output_file', str(output_file),
+            '--workdir', str(self.workdir),
             '--precomputed',
             '--embed_dim', str(self.embed_dim),
             '--variance_epsilon', str(eps)
@@ -275,6 +356,7 @@ class ZkLLMProofGeneratorV2:
             str(self.model_size), str(layer), str(self.seq_len),
             '--input_file', str(input_file),
             '--output_file', str(output_file),
+            '--workdir', str(self.workdir),
             '--precomputed',
             '--embed_dim', str(self.embed_dim),
             '--hidden_dim', str(self.hidden_dim)
@@ -300,6 +382,7 @@ class ZkLLMProofGeneratorV2:
             str(self.model_size), str(layer), str(self.seq_len),
             '--block_input_file', str(block_input),
             '--block_output_file', str(ffn_output),
+            '--workdir', str(self.workdir),
             '--output_file', str(skip_output)
         ]
         
@@ -330,6 +413,7 @@ class ZkLLMProofGeneratorV2:
             'ffn': False,
             'skip_connection': False
         }
+        self._ensure_layer_links(layer)
         
         # 1. Input RMSNorm
         print(f"\n[1/5] Input RMSNorm")
@@ -382,7 +466,8 @@ class ZkLLMProofGeneratorV2:
         print(f"{'='*70}")
         print(f"Model Size: {self.model_size}b")
         print(f"Layers:     {start_layer} to {end_layer}")
-        print(f"Work Dir:   {self.workdir}")
+        print(f"Base Work:  {self.base_workdir}")
+        print(f"Proof Dir:  {self.workdir}")
         print(f"Activations:{self.activation_dir}")
         print(f"{'='*70}")
         
@@ -422,6 +507,7 @@ class ZkLLMProofGeneratorV2:
             print(f"Failed layers:     {failed_layers}")
         
         print(f"\nProofs saved to:   {self.workdir}/")
+        print(f"Base weights at:   {self.base_workdir}/")
         print(f"Activations at:    {self.activation_dir}/")
         print(f"{'='*70}")
         
@@ -456,6 +542,14 @@ Examples:
                         help='Ending layer (default: same as start_layer)')
     parser.add_argument('--device', type=str, default='cpu',
                         help='Device to use (cpu or cuda)')
+    parser.add_argument('--act_dir', type=str, default=None,
+                        help='Activations directory')
+    parser.add_argument('--workdir', type=str, default=None,
+                        help='Base workdir for model artifacts')
+    parser.add_argument('--run_id', type=str, default=None,
+                        help='Session/run ID (proofs saved under base workdir/<run_id>)')
+    parser.add_argument('--model_card', type=str, default=None,
+                        help='Override model card or snapshot path')
     
     args = parser.parse_args()
     
@@ -473,7 +567,11 @@ Examples:
         device=args.device,
         start_layer=start_layer,
         end_layer=end_layer,
-        seq_len=args.seq_len
+        seq_len=args.seq_len,
+        act_dir=args.act_dir,
+        workdir=args.workdir,
+        run_id=args.run_id,
+        model_card=args.model_card
     )
     
     # Run generation

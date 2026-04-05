@@ -2,6 +2,7 @@ import os, sys
 import argparse
 import os, sys
 import argparse
+import gc
 
 parser = argparse.ArgumentParser(description='LLaMa-2 FFN V2 - Proof Generation')
 parser.add_argument('model_size', type=int, choices = [7, 13], help='The size of the model to use. Default is 13')
@@ -9,6 +10,7 @@ parser.add_argument('layer', type=int, help='The layer to use for FFN')
 parser.add_argument('seq_len', type=int, help='The sequence length to use for FFN')
 parser.add_argument('--input_file', required = True, type=str, help='The input file to use for FFN (output from post-attention rmsnorm)')
 parser.add_argument('--output_file', default = 'llama-ffn-output.bin', type=str, help='The output file to use for FFN')
+parser.add_argument('--workdir', type=str, default=None, help='Work directory for model artifacts and proofs')
 parser.add_argument('--precomputed', action='store_true', help='Use precomputed parameters (skip model loading)')
 parser.add_argument('--embed_dim', type=int, default=None, help='Embedding dimension (required with --precomputed)')
 parser.add_argument('--hidden_dim', type=int, default=None, help='Hidden dimension (required with --precomputed)')
@@ -63,8 +65,11 @@ if __name__ == '__main__':
         embed_dim = layer.mlp.up_proj.in_features
         hidden_dim = layer.mlp.up_proj.out_features
         del model
-        import gc
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
     
     # Verify input file exists
     if not os.path.isfile(args.input_file):
@@ -72,7 +77,8 @@ if __name__ == '__main__':
         print("Please run post-attention rmsnorm first to generate the input")
         exit(1)
     
-    workdir = f'./zkllm-workdir/Llama-2-{args.model_size}b'
+    workdir = args.workdir or f'./zkllm-workdir/Llama-2-{args.model_size}b'
+    os.makedirs(workdir, exist_ok=True)
     layer_prefix = f'layer-{args.layer}'
     
     print(f"\n{'='*70}")
@@ -88,6 +94,15 @@ if __name__ == '__main__':
     print(f"Workdir: {workdir}")
     print(f"{'='*70}\n")
     
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except ImportError:
+        pass
+
     ret = os.system(f'./ffn_v2 {args.input_file} {args.seq_len} {embed_dim} {hidden_dim} {workdir} {layer_prefix} {args.output_file}')
     
     # Keep swiglu-table.bin for verifier to use for claimed output verification

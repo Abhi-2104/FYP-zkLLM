@@ -61,10 +61,11 @@ vector<Claim> zkFC::prove(const FrTensor& X, const FrTensor& Y, vector<Polynomia
     auto u_input = random_vec(ceilLog2(inputSize));
     auto u_output = random_vec(ceilLog2(outputSize));
 
-    // Recomputed claim internally to ensure exact field arithmetic
+    // PRECISION FIX: Recompute Y internally to ensure exact field arithmetic
     FrTensor Y_computed = (*this)(X);
     auto claim = Y_computed.multi_dim_me({u_batch, u_output}, {batchSize, outputSize});
 
+    // Compute claims without duplicating large tensors to reduce memory pressure
     auto claim_X = X.multi_dim_me({u_batch, u_input}, {batchSize, inputSize});
     auto claim_W = weights.multi_dim_me({u_input, u_output}, {inputSize, outputSize});
 
@@ -116,15 +117,33 @@ vector<Claim> zkFC::prove(const FrTensor& X, const FrTensor& Y, vector<Polynomia
     // This handles cases where Y might have been computed with approximate operations (e.g., softmax)
     FrTensor Y_computed = (*this)(X);
     
+    // Use the recomputed Y for claim generation to ensure exact field arithmetic
     auto claim = Y_computed.multi_dim_me({u_batch, u_output}, {batchSize, outputSize});
     
     // Save the initial claim for the verifier
     initial_claim_out = claim;
 
+    // DEBUG: Print dimensions and challenges (to match verifier output)
+    std::cerr << "DEBUG prove: inputSize=" << inputSize << ", outputSize=" << outputSize << std::endl;
+    std::cerr << "DEBUG prove: weights.size=" << weights.size << std::endl;
+    std::cerr << "DEBUG prove: u_input.size()=" << u_input.size() << ", u_output.size()=" << u_output.size() << std::endl;
+    std::cerr << "DEBUG prove: u_input[0]=" << u_input[0] << std::endl;
+    std::cerr << "DEBUG prove: u_output[0]=" << u_output[0] << std::endl;
+    
+    // Print first weight element
+    Fr_t w0;
+    cudaMemcpy(&w0, weights.gpu_data, sizeof(Fr_t), cudaMemcpyDeviceToHost);
+    std::cerr << "DEBUG prove: weights[0]=" << w0 << std::endl;
+    std::cerr << "DEBUG prove: weights.gpu_data=" << (void*)weights.gpu_data << std::endl;
+
+    // Compute claims without duplicating large tensors to reduce memory pressure
     auto claim_X = X.multi_dim_me({u_batch, u_input}, {batchSize, inputSize});
     auto claim_W = weights.multi_dim_me({u_input, u_output}, {inputSize, outputSize});
-    claim_W_out = claim_W;
     
+    std::cerr << "DEBUG prove: claim_W=" << claim_W << std::endl;
+    
+    // Save weight claim for cross-verification
+    claim_W_out = claim_W;
 
     auto X_reduced = X.partial_me(u_batch, batchSize, inputSize);
     auto W_reduced = weights.partial_me(u_output, outputSize, 1);
@@ -257,22 +276,11 @@ bool zkFC::verify(const vector<Polynomial>& proof,
     std::cerr << "DEBUG verify: weights.gpu_data=" << (void*)weights.gpu_data << std::endl;
     std::cerr << "DEBUG verify: weights.size=" << weights.size << std::endl;
     
-    // IMPORTANT: Make a COPY of weights before multi_dim_me because it corrupts the original
-    // (This is a known issue with CUDA memory allocation in recursive functions)
-    FrTensor weights_copy(weights);
-    
-    // Verify copy worked
-    Fr_t w0_copy;
-    cudaMemcpy(&w0_copy, weights_copy.gpu_data, sizeof(Fr_t), cudaMemcpyDeviceToHost);
-    std::cerr << "DEBUG verify: weights_copy[0]=" << w0_copy << std::endl;
-    std::cerr << "DEBUG verify: weights_copy.gpu_data=" << (void*)weights_copy.gpu_data << std::endl;
-    std::cerr << "DEBUG verify: weights_copy.size=" << weights_copy.size << std::endl;
-    
     std::cerr << "DEBUG verify: Calling multi_dim_me with u_input.size()=" << u_input.size() 
               << ", u_output.size()=" << u_output.size() 
               << ", inputSize=" << inputSize << ", outputSize=" << outputSize << std::endl;
     
-    auto claim_W_computed = weights_copy.multi_dim_me({u_input, u_output}, {inputSize, outputSize});
+    auto claim_W_computed = weights.multi_dim_me({u_input, u_output}, {inputSize, outputSize});
     
     std::cerr << "DEBUG verify: claim_W_computed returned" << std::endl;
     

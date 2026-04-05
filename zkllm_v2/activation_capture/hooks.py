@@ -112,17 +112,6 @@ class ActivationHookManager:
         handle = layer_module.mlp.register_forward_hook(capture_mlp_output)
         self.hooks.append(handle)
         
-        # HOOK 7: Capture Self-Attention output (o_proj output)
-        def capture_attn_output(module, input, output):
-            """Forward hook: captures output of Self-Attention (o_proj)"""
-            self.activations[layer_idx]['attn_output'] = output.detach().clone()
-            
-            if self.verbose:
-                print(f"  ✓ Captured layer-{layer_idx}-attn-output: {tuple(output.shape)}")
-        
-        handle = layer_module.self_attn.o_proj.register_forward_hook(capture_attn_output)
-        self.hooks.append(handle)
-        
         # HOOK 6: Capture block output (AFTER final skip connection)
         # This is: layer-{i}-block-output.bin
         # Block output = post_attn_residual + mlp_output

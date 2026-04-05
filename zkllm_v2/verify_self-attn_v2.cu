@@ -155,34 +155,36 @@ int main(int argc, char* argv[]) {
 
         // ===== STEP 5: Validate Proof Structure =====
         cout << "Step 5: Validating proof structure..." << endl;
+        uint expected_fc_rounds = ceilLog2(E);
+        cout << "  Expected FC projection rounds: " << expected_fc_rounds << endl;
         
         // Check Q proof
-        if (proof.q_proof.size() != 12) {
+        if (proof.q_proof.size() != expected_fc_rounds) {
             throw runtime_error("Q proof has unexpected size: " + to_string(proof.q_proof.size()));
         }
-        cout << "  ✓ Q proof structure valid (12 polynomials)" << endl;
+        cout << "  ✓ Q proof structure valid (" << expected_fc_rounds << " polynomials)" << endl;
         
         // Check K proof
-        if (proof.k_proof.size() != 12) {
+        if (proof.k_proof.size() != expected_fc_rounds) {
             throw runtime_error("K proof has unexpected size: " + to_string(proof.k_proof.size()));
         }
-        cout << "  ✓ K proof structure valid (12 polynomials)" << endl;
+        cout << "  ✓ K proof structure valid (" << expected_fc_rounds << " polynomials)" << endl;
         
         // Check V proof
-        if (proof.v_proof.size() != 12) {
+        if (proof.v_proof.size() != expected_fc_rounds) {
             throw runtime_error("V proof has unexpected size: " + to_string(proof.v_proof.size()));
         }
-        cout << "  ✓ V proof structure valid (12 polynomials)" << endl;
+        cout << "  ✓ V proof structure valid (" << expected_fc_rounds << " polynomials)" << endl;
         
-        // Check O proof - can be 0 or 12 polynomials depending on prove() success
+        // Check O proof - can be 0 or expected_fc_rounds polynomials depending on prove() success
         // V2 architecture: prove() may fail for output projection due to numerical precision
         // This is acceptable since v2 separates proof generation from verification
-        if (proof.o_proof.size() != 12 && proof.o_proof.size() != 0) {
+        if (proof.o_proof.size() != expected_fc_rounds && proof.o_proof.size() != 0) {
             throw runtime_error("O proof has unexpected size: " + to_string(proof.o_proof.size()) + 
-                              " (expected 12 or 0)");
+                              " (expected " + to_string(expected_fc_rounds) + " or 0)");
         }
-        if (proof.o_proof.size() == 12) {
-            cout << "  ✓ O proof structure valid (12 polynomials)" << endl;
+        if (proof.o_proof.size() == expected_fc_rounds) {
+            cout << "  ✓ O proof structure valid (" << expected_fc_rounds << " polynomials)" << endl;
         } else {
             cout << "  ℹ O proof empty (inline verification deferred, v2 architecture)" << endl;
         }
@@ -213,7 +215,7 @@ int main(int argc, char* argv[]) {
         bool q_verified = false, k_verified = false, v_verified = false, o_verified = false;
         
         // Verify Q projection
-        if (proof.q_proof.size() == 12 && 
+        if (proof.q_proof.size() == expected_fc_rounds && 
             !proof.q_u_batch.empty() && !proof.q_u_input.empty() && !proof.q_u_output.empty()) {
             q_verified = fc_q.verify(proof.q_proof, proof.q_u_batch, proof.q_u_input, proof.q_u_output,
                                     proof.q_claim, proof.q_claim_W);
@@ -227,7 +229,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Verify K projection
-        if (proof.k_proof.size() == 12 &&
+        if (proof.k_proof.size() == expected_fc_rounds &&
             !proof.k_u_batch.empty() && !proof.k_u_input.empty() && !proof.k_u_output.empty()) {
             k_verified = fc_k.verify(proof.k_proof, proof.k_u_batch, proof.k_u_input, proof.k_u_output,
                                     proof.k_claim, proof.k_claim_W);
@@ -241,7 +243,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Verify V projection
-        if (proof.v_proof.size() == 12 &&
+        if (proof.v_proof.size() == expected_fc_rounds &&
             !proof.v_u_batch.empty() && !proof.v_u_input.empty() && !proof.v_u_output.empty()) {
             v_verified = fc_v.verify(proof.v_proof, proof.v_u_batch, proof.v_u_input, proof.v_u_output,
                                     proof.v_claim, proof.v_claim_W);
@@ -392,7 +394,7 @@ int main(int argc, char* argv[]) {
         cout << endl;
         
         // Verify O projection
-        if (proof.o_proof.size() == 12 &&
+        if (proof.o_proof.size() == expected_fc_rounds &&
             !proof.o_u_batch.empty() && !proof.o_u_input.empty() && !proof.o_u_output.empty()) {
             o_verified = fc_o.verify(proof.o_proof, proof.o_u_batch, proof.o_u_input, proof.o_u_output,
                                     proof.o_claim, proof.o_claim_W);

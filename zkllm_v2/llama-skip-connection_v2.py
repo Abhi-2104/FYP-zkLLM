@@ -10,6 +10,7 @@ parser.add_argument('seq_len', type=int, help='The sequence length')
 parser.add_argument('--block_input_file', required=True, type=str, help='Input of the block (residual)')
 parser.add_argument('--block_output_file', required=True, type=str, help='Output of the block (FFN output)')
 parser.add_argument('--output_file', default='skip-output.bin', type=str, help='Output of the skip connection')
+parser.add_argument('--workdir', type=str, default=None, help='Work directory for model artifacts and proofs')
 
 import fileio_utils
 
@@ -38,7 +39,8 @@ if __name__ == '__main__':
         print(f"Error: Block output file {args.block_output_file} not found")
         exit(1)
     
-    workdir = f'./zkllm-workdir/Llama-2-{args.model_size}b'
+    workdir = args.workdir or f'./zkllm-workdir/Llama-2-{args.model_size}b'
+    os.makedirs(workdir, exist_ok=True)
     layer_prefix = f'layer-{args.layer}'
     
     print(f"\n{'='*70}")

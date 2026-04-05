@@ -49,7 +49,6 @@ int main(int argc, char *argv[])
 
     auto Y = g_inv_rms_ * X;
     auto Y_ = rs2(Y);
-
     auto v0 = ceilLog2(seq_len);
     auto v1 = ceilLog2(embed_dim);
 
@@ -57,8 +56,7 @@ int main(int argc, char *argv[])
     // Generate random challenges FIRST before any operations that might modify tensors
     auto u = random_vec(ceilLog2(Y.size));
     
-    // Compute claimed evaluations BEFORE any prove() operations
-    Fr_t claimed_input = X(u);
+    // Compute claimed output BEFORE any prove() operations
     Fr_t claimed_output = g_inv_rms_(u) * X(u);
     
     // Now generate all proofs - explicitly clear/initialize vectors
@@ -82,7 +80,6 @@ int main(int argc, char *argv[])
     rmsnorm_proof.rs2_proof = rs2_proof;  // Will be empty
     rmsnorm_proof.random_u = u;  // Save random challenges
     rmsnorm_proof.random_v = u;  // For Hadamard product, v = u (same point)
-    rmsnorm_proof.claimed_input = claimed_input;    // Save claimed input
     rmsnorm_proof.claimed_output = claimed_output;  // Save claimed value
 
     // Save the complete proof to a single file

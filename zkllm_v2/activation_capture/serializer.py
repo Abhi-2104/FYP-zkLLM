@@ -117,10 +117,6 @@ class ActivationSerializer:
             # Block output for skip connection
             # This matches: layer-{i}-block-output.bin
             'block_output': f'layer-{layer_idx}-block-output.bin',
-            
-            # Intermediate outputs for component proofs
-            'mlp_output': f'layer-{layer_idx}-ffn-output.bin',
-            'attn_output': f'layer-{layer_idx}-self-attn-output.bin',
         }
         
         for internal_name, filename in file_mapping.items():
@@ -166,5 +162,7 @@ class ActivationSerializer:
                 output_dir
             )
             total_saved += saved
+            # Explicitly clear tensors after saving to free memory immediately
+            layer_activations.clear()
         
         return total_saved

@@ -18,17 +18,27 @@ import sys
 import subprocess
 import time
 import argparse
+import shutil
 from pathlib import Path
 
 
 class ZkLLMProofVerifierV2:
-    def __init__(self, model_size=7, seq_len=128, workdir=None):
+    def __init__(self, model_size=7, seq_len=128, workdir=None, act_dir=None, run_id=None):
         self.model_size = model_size
         self.seq_len = seq_len
-        self.workdir = workdir or f'./zkllm-workdir/Llama-2-{model_size}b'
+        model_name = "Llama-2-7b" if model_size == 7 else "Llama-2-13b"
+        self.base_workdir = Path(workdir) if workdir else Path(f'./zkllm-workdir/{model_name}')
+        self.run_id = str(run_id) if run_id is not None else None
+        self.workdir = self.base_workdir / self.run_id if self.run_id else self.base_workdir
+        self.workdir.mkdir(parents=True, exist_ok=True)
         self.total_layers = 32 if model_size == 7 else 40
 
-        self.activation_dir = Path('./activations')
+        if act_dir:
+            self.activation_dir = Path(act_dir)
+        elif self.run_id:
+            self.activation_dir = Path('./activations') / self.run_id
+        else:
+            self.activation_dir = Path('./activations')
 
         # Auto-detect real sequence length from capture output if available
         embed_dim = 4096 if model_size == 7 else 5120
@@ -43,6 +53,52 @@ class ZkLLMProofVerifierV2:
 
         # Track results
         self.results = {}
+
+    def _link_from_base(self, relative_path):
+        if self.base_workdir == self.workdir:
+            return
+        src = self.base_workdir / relative_path
+        dest = self.workdir / relative_path
+        if dest.exists() or not src.exists():
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(src, dest)
+        except OSError:
+            shutil.copy2(src, dest)
+
+    def _ensure_common_links(self):
+        common_files = [
+            "input_layernorm.weight-pp.bin",
+            "post_attention_layernorm.weight-pp.bin",
+            "self_attn.q_proj.weight-pp.bin",
+            "self_attn.k_proj.weight-pp.bin",
+            "self_attn.v_proj.weight-pp.bin",
+            "self_attn.o_proj.weight-pp.bin",
+            "mlp.gate_proj.weight-pp.bin",
+            "mlp.up_proj.weight-pp.bin",
+            "mlp.down_proj.weight-pp.bin",
+        ]
+        for fname in common_files:
+            self._link_from_base(fname)
+
+    def _ensure_layer_links(self, layer):
+        self._ensure_common_links()
+        layer_prefix = f"layer-{layer}"
+        names = [
+            "input_layernorm.weight",
+            "post_attention_layernorm.weight",
+            "self_attn.q_proj.weight",
+            "self_attn.k_proj.weight",
+            "self_attn.v_proj.weight",
+            "self_attn.o_proj.weight",
+            "mlp.gate_proj.weight",
+            "mlp.up_proj.weight",
+            "mlp.down_proj.weight",
+        ]
+        for name in names:
+            self._link_from_base(f"{layer_prefix}-{name}-int.bin")
+            self._link_from_base(f"{layer_prefix}-{name}-commitment.bin")
 
     def compile_verifiers(self):
         """Compile all verification binaries"""
@@ -62,23 +118,47 @@ class ZkLLMProofVerifierV2:
         print()
         return True
 
-    def run_command(self, cmd, description=""):
-        """Run a command and handle errors"""
+    def run_command(self, cmd, description="", retries=0, retry_delay=0.35):
+        """Run a command and handle errors (with optional retry on transient failures)."""
         print(f"\n{'─'*60}")
         print(f"[VERIFY] {description}")
         print(f"{'─'*60}")
         print(f"$ {' '.join(cmd)}")
 
+        for attempt in range(retries + 1):
+            try:
+                subprocess.run(cmd, check=True, capture_output=False, text=True)
+                if attempt > 0:
+                    print(f"✅ {description} - SUCCESS (retry {attempt}/{retries})")
+                else:
+                    print(f"✅ {description} - SUCCESS")
+                return True
+            except subprocess.CalledProcessError as e:
+                print(f"❌ {description} - FAILED (exit code {e.returncode})")
+                if attempt < retries:
+                    print(f"↻ Retrying {description} ({attempt + 1}/{retries}) after cleanup...")
+                    self._python_gpu_cleanup()
+                    time.sleep(retry_delay)
+                    continue
+                return False
+            except FileNotFoundError as e:
+                print(f"❌ {description} - FAILED (command not found: {e})")
+                return False
+            finally:
+                self._python_gpu_cleanup()
+
+    def _python_gpu_cleanup(self):
+        """Best-effort cleanup between verifier invocations."""
+        import gc
+        gc.collect()
         try:
-            result = subprocess.run(cmd, check=True, capture_output=False, text=True)
-            print(f"✅ {description} - SUCCESS")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"❌ {description} - FAILED (exit code {e.returncode})")
-            return False
-        except FileNotFoundError as e:
-            print(f"❌ {description} - FAILED (command not found: {e})")
-            return False
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
 
     def verify_input_rmsnorm(self, layer):
         """
@@ -92,7 +172,7 @@ class ZkLLMProofVerifierV2:
 
         cmd = [
             './verify_rmsnorm_v2',
-            proof_file, self.workdir, f'layer-{layer}', 'input',
+            proof_file, str(self.workdir), f'layer-{layer}', 'input',
             str(input_file)
         ]
 
@@ -110,11 +190,11 @@ class ZkLLMProofVerifierV2:
 
         cmd = [
             './verify_self-attn_v2',
-            proof_file, self.workdir, f'layer-{layer}',
+            proof_file, str(self.workdir), f'layer-{layer}',
             str(input_file)
         ]
 
-        return self.run_command(cmd, f"Layer {layer} Self-Attention Verification")
+        return self.run_command(cmd, f"Layer {layer} Self-Attention Verification", retries=1)
 
     def verify_post_attn_rmsnorm(self, layer):
         """
@@ -128,7 +208,7 @@ class ZkLLMProofVerifierV2:
 
         cmd = [
             './verify_rmsnorm_v2',
-            proof_file, self.workdir, f'layer-{layer}', 'post_attention',
+            proof_file, str(self.workdir), f'layer-{layer}', 'post_attention',
             str(input_file)
         ]
 
@@ -146,12 +226,12 @@ class ZkLLMProofVerifierV2:
 
         cmd = [
             './verify_ffn_v2',
-            proof_file, self.workdir, f'layer-{layer}',
+            proof_file, str(self.workdir), f'layer-{layer}',
             str(self.seq_len),
             str(input_file)
         ]
 
-        return self.run_command(cmd, f"Layer {layer} FFN Verification")
+        return self.run_command(cmd, f"Layer {layer} FFN Verification", retries=1)
 
     def verify_skip_connection(self, layer):
         """
@@ -166,18 +246,20 @@ class ZkLLMProofVerifierV2:
 
         cmd = [
             './verify_skip-connection_v2',
-            self.workdir, f'layer-{layer}',
+            str(self.workdir), f'layer-{layer}',
             str(block_input),
             str(ffn_output)
         ]
 
-        return self.run_command(cmd, f"Layer {layer} Skip Connection Verification")
+        return self.run_command(cmd, f"Layer {layer} Skip Connection Verification", retries=1)
 
     def verify_single_layer(self, layer):
         """Verify all components of a single layer"""
         print(f"\n{'='*70}")
         print(f"VERIFYING LAYER {layer}")
         print(f"{'='*70}")
+
+        self._ensure_layer_links(layer)
 
         results = {
             'input_rmsnorm': False,
@@ -234,7 +316,8 @@ class ZkLLMProofVerifierV2:
         print(f"Model Size: {self.model_size}b")
         print(f"Layers:     {start_layer} to {end_layer}")
         print(f"Seq Length: {self.seq_len}")
-        print(f"Work Dir:   {self.workdir}")
+        print(f"Base Work:  {self.base_workdir}")
+        print(f"Proof Dir:  {self.workdir}")
         print(f"Activations:{self.activation_dir}")
         print(f"{'='*70}")
 
@@ -276,7 +359,8 @@ class ZkLLMProofVerifierV2:
             print(f"Failed layers:        {failed_layers}")
 
         print(f"\nProofs verified from: {self.workdir}/")
-        print(f"Activations at:       {self.activation_dir}/")
+        print(f"Base weights at:       {self.base_workdir}/")
+        print(f"Activations at:        {self.activation_dir}/")
         print(f"{'='*70}")
 
         return successful_layers, failed_layers
@@ -313,6 +397,10 @@ Examples:
                         help='Ending layer (default: same as start_layer)')
     parser.add_argument('--workdir', type=str, default=None,
                         help='Work directory path')
+    parser.add_argument('--run_id', type=str, default=None,
+                        help='Session/run ID (proofs stored under workdir/<run_id>)')
+    parser.add_argument('--act_dir', type=str, default=None,
+                        help='Activations directory')
 
     args = parser.parse_args()
 
@@ -320,7 +408,9 @@ Examples:
     verifier = ZkLLMProofVerifierV2(
         model_size=args.model_size,
         seq_len=args.seq_len,
-        workdir=args.workdir
+        workdir=args.workdir,
+        act_dir=args.act_dir,
+        run_id=args.run_id
     )
 
     # Determine layer range

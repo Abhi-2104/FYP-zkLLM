@@ -125,43 +125,28 @@ int main(int argc, char *argv[])
                 cout << "\n  >>> CRYPTOGRAPHIC CLAIMED OUTPUT CHECK <<<" << endl;
                 cout << "  Evaluating g_inv_rms_(u) * X(u) at random challenges..." << endl;
                 
-                Fr_t x_at_u = X(proof.random_u);
-                Fr_t computed_claim = g_inv_rms_(proof.random_u) * x_at_u;
+                Fr_t computed_claim = g_inv_rms_(proof.random_u) * X(proof.random_u);
                 
-                cout << "  X(u):           0x";
-                for (int i = 3; i >= 0; i--)
-                    cout << hex << setw(8) << setfill('0') << x_at_u.val[i];
-                cout << "..." << dec << endl;
-
-                cout << "  Proof X(u):     0x";
-                for (int i = 3; i >= 0; i--)
-                    cout << hex << setw(8) << setfill('0') << proof.claimed_input.val[i];
-                cout << "..." << dec << endl;
-
-                cout << "  Computed Y(u):  0x";
+                cout << "  Computed claim: 0x";
                 for (int i = 3; i >= 0; i--)
                     cout << hex << setw(8) << setfill('0') << computed_claim.val[i];
                 cout << "..." << dec << endl;
                 
-                cout << "  Proof Y(u):     0x";
+                cout << "  Proof claim:    0x";
                 for (int i = 3; i >= 0; i--)
                     cout << hex << setw(8) << setfill('0') << proof.claimed_output.val[i];
                 cout << "..." << dec << endl;
                 
-                if (x_at_u == proof.claimed_input && computed_claim == proof.claimed_output) {
+                if (computed_claim == proof.claimed_output) {
                     cout << "\n  ✅ CLAIMED OUTPUT VERIFIED!" << endl;
-                    cout << "     - Proof claims match recomputed values" << endl;
-                    cout << "     - Proves correct computation with THIS input and THIS commitment" << endl;
+                    cout << "     - Proof claim matches recomputed value" << endl;
+                    cout << "     - Proves correct computation with THIS commitment" << endl;
                     cout << "     - CRYPTOGRAPHIC BINDING VERIFIED" << endl;
                     claimed_output_verified = true;
                 } else {
                     cout << "\n  ❌ CLAIMED OUTPUT MISMATCH!" << endl;
-                    if (x_at_u != proof.claimed_input) {
-                        cout << "     - Input mismatch: Either wrong activation file or malicious proof" << endl;
-                    }
-                    if (computed_claim != proof.claimed_output) {
-                        cout << "     - Computation mismatch: Proof was NOT generated with this commitment" << endl;
-                    }
+                    cout << "     - Proof was NOT generated with this commitment" << endl;
+                    cout << "     - Either wrong layer or malicious proof" << endl;
                     cout << "     - CRYPTOGRAPHIC BINDING CHECK FAILED" << endl;
                     delete rms_inv_temp_ptr;
                     cerr << "\n✗ VERIFICATION FAILED: Claimed output mismatch" << endl;

@@ -106,16 +106,20 @@ async function loadModelsDropdown() {
     try {
         const res = await fetch('/api/models');
         const data = await res.json();
+        window.__MODEL_MAP__ = {};
+        data.available_models.forEach(m => {
+          window.__MODEL_MAP__[m.id] = m;
+        });
         const sel = document.getElementById('model-select');
         if (!sel) return;
         sel.innerHTML = '';
         const selected = data.selected_model;
         data.available_models.forEach(m => {
-            const opt = document.createElement('option');
-            opt.value = m.id;
-            opt.textContent = `${m.name} (${m.size}B, Seq: ${m.seq_len})`;
-            if (m.id === selected) opt.selected = true;
-            sel.appendChild(opt);
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = `${m.name} (${m.size}B, Seq: ${m.seq_len})`;
+          if (m.id === selected) opt.selected = true;
+          sel.appendChild(opt);
         });
         
         sel.addEventListener('change', async (e) => {
@@ -137,6 +141,134 @@ async function loadModelsDropdown() {
 // ---------------------------------------------------------------------------
 let currentModalSid = null;
 let currentModalCallback = null;
+
+function getModelInfo(modelId) {
+  const map = window.__MODEL_MAP__ || {};
+  return map[modelId] || null;
+}
+
+function getSelectedModelId() {
+  const sel = document.getElementById('model-select');
+  return sel ? sel.value : null;
+}
+
+function getLayerCountForModel(modelId) {
+  const info = getModelInfo(modelId);
+  return info && Number.isFinite(info.layers) ? info.layers : 32;
+}
+
+function getLayerCountForSession(sid) {
+  const sessions = window.__SESSIONS__ || [];
+  const session = sessions.find(s => String(s.id) === String(sid));
+  if (session && session.model_id) {
+    return getLayerCountForModel(session.model_id);
+  }
+  const selected = getSelectedModelId();
+  return getLayerCountForModel(selected);
+}
+
+function getActiveModelFilter() {
+  const path = window.location.pathname.toLowerCase();
+  const select = document.getElementById('model-select');
+  const isModelScoped = path.includes('/provider') || path.includes('/verifier');
+  if (!isModelScoped || !select || !select.value) return null;
+  return select.value;
+}
+
+function parseBackendTimestamp(rawTs) {
+  if (!rawTs) return null;
+  if (rawTs instanceof Date) return Number.isNaN(rawTs.getTime()) ? null : rawTs;
+
+  let ts = String(rawTs).trim();
+  if (!ts) return null;
+
+  // SQLite CURRENT_TIMESTAMP is UTC "YYYY-MM-DD HH:MM:SS".
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(ts)) {
+    ts = ts.replace(' ', 'T') + 'Z';
+  } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(ts)) {
+    ts = ts + 'Z';
+  }
+
+  let d = new Date(ts);
+  if (Number.isNaN(d.getTime())) {
+    d = new Date(String(rawTs));
+  }
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatTimestampIST(rawTs, options = {}) {
+  const d = parseBackendTimestamp(rawTs);
+  if (!d) {
+    return {
+      date: '--',
+      time: '--:-- IST',
+      datetime: '--',
+    };
+  }
+
+  const showSeconds = options.showSeconds !== false;
+  const dateFmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+  const timeFmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: showSeconds ? '2-digit' : undefined,
+    hour12: false,
+  });
+
+  const dateParts = dateFmt.formatToParts(d);
+  const day = dateParts.find(p => p.type === 'day')?.value || '00';
+  const month = dateParts.find(p => p.type === 'month')?.value || '00';
+  const year = dateParts.find(p => p.type === 'year')?.value || '0000';
+  const date = `${day}-${month}-${year}`;
+
+  let time = timeFmt.format(d);
+  if (!showSeconds && /^\d{2}:\d{2}:\d{2}$/.test(time)) {
+    time = time.slice(0, 5);
+  }
+  time = `${time} IST`;
+
+  return {
+    date,
+    time,
+    datetime: `${date} ${time}`,
+  };
+}
+
+function refreshLedgerNow(options = {}) {
+  const modelFilter = getActiveModelFilter();
+  loadSessions(modelFilter);
+  if (options.syncProofState && typeof restoreProofState === 'function') {
+    restoreProofState();
+  }
+  if (options.syncVerifierState && typeof loadVerifierState === 'function') {
+    loadVerifierState();
+  }
+}
+
+function stopLedgerAutoRefresh() {
+  if (window.__LEDGER_AUTO_REFRESH_TIMER__) {
+    clearInterval(window.__LEDGER_AUTO_REFRESH_TIMER__);
+    window.__LEDGER_AUTO_REFRESH_TIMER__ = null;
+  }
+}
+
+function startLedgerAutoRefresh(durationMs = 60000, intervalMs = 2000, options = {}) {
+  stopLedgerAutoRefresh();
+  const startedAt = Date.now();
+  refreshLedgerNow(options);
+  window.__LEDGER_AUTO_REFRESH_TIMER__ = setInterval(() => {
+    refreshLedgerNow(options);
+    if (Date.now() - startedAt >= durationMs) {
+      stopLedgerAutoRefresh();
+    }
+  }, intervalMs);
+}
 
 function showLayerModal(sid, type, callback) {
     currentModalSid = sid;
@@ -178,6 +310,19 @@ function showLayerModal(sid, type, callback) {
     window._verifyMode = 'complete';
     window._verifySid  = sid;
     window._verifyCallback = callback;
+
+    const totalLayers = getLayerCountForSession(sid);
+    const startInput = document.getElementById('modal-start-layer');
+    const endInput = document.getElementById('modal-end-layer');
+    const maxLayer = Math.max(totalLayers - 1, 0);
+    if (startInput) {
+      startInput.max = String(maxLayer);
+      startInput.value = 0;
+    }
+    if (endInput) {
+      endInput.max = String(maxLayer);
+      endInput.value = maxLayer;
+    }
 }
 
 window.selectVerifyMode = function(mode) {
@@ -197,9 +342,9 @@ window.selectVerifyMode = function(mode) {
         if (layerSection) layerSection.style.display = 'none';
         if (confirmBtn)   confirmBtn.style.display = 'none';
         
-        // Immediately fire with full layer range (default 32 layers)
+        // Immediately fire with full layer range for the selected model
         closeLayerModal();
-        const totalLayers = 32; 
+        const totalLayers = getLayerCountForSession(window._verifySid);
         if (window._verifyCallback) window._verifyCallback(window._verifySid, 0, totalLayers - 1);
     } else {
         if (modePartial)  modePartial.className  = 'btn btn-brand';
@@ -210,8 +355,13 @@ window.selectVerifyMode = function(mode) {
             confirmBtn.style.display = 'block';
             confirmBtn.textContent = type === 'proof' ? 'Start Regeneration' : 'Start Verification';
             confirmBtn.onclick = () => {
-                const start = parseInt(document.getElementById('modal-start-layer')?.value) || 0;
-                const end   = parseInt(document.getElementById('modal-end-layer')?.value)   ?? 31;
+                const startVal = parseInt(document.getElementById('modal-start-layer')?.value) || 0;
+                const endVal = parseInt(document.getElementById('modal-end-layer')?.value);
+                const maxEnd = getLayerCountForSession(window._verifySid) - 1;
+                const start = Math.max(0, Math.min(startVal, maxEnd));
+                const end = Number.isFinite(endVal)
+                  ? Math.max(start, Math.min(endVal, maxEnd))
+                  : maxEnd;
                 closeLayerModal();
                 if (window._verifyCallback) window._verifyCallback(window._verifySid, start, end);
             };
@@ -224,6 +374,589 @@ function closeLayerModal() {
     if (modal) modal.classList.remove('active');
     currentModalSid = null;
     currentModalCallback = null;
+}
+
+// ---------------------------------------------------------------------------
+// Session Conversation Modal
+// ---------------------------------------------------------------------------
+function ensureSessionDetailsModal() {
+  let overlay = document.getElementById('session-details-modal');
+  if (overlay) return overlay;
+
+  overlay = document.createElement('div');
+  overlay.id = 'session-details-modal';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal card" style="max-width:760px; width:92%;">
+      <h3 id="session-details-title" style="margin-bottom:0.35rem;">Session Trace</h3>
+      <p id="session-details-sub" class="text-secondary" style="font-size:0.85rem; margin-bottom:1.25rem;"></p>
+
+      <div id="session-panel-meta" style="margin-bottom:1rem;">
+        <div style="font-size:0.7rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-muted); margin-bottom:0.45rem;">Metadata</div>
+        <div id="session-details-meta" style="display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0.55rem; font-family:'JetBrains Mono', monospace; font-size:0.78rem;"></div>
+      </div>
+
+      <div id="session-details-tabs" style="display:flex; gap:0.5rem; margin-bottom:1rem;">
+        <button id="session-tab-prompt" class="btn btn-sm" style="background:rgba(99,102,241,0.12); color:var(--indigo); border-color:rgba(99,102,241,0.28);">Prompt</button>
+        <button id="session-tab-audit" class="btn btn-sm btn-ghost" style="color:var(--text-muted);">Verification Audit</button>
+      </div>
+
+      <div id="session-panel-prompt" style="margin-bottom:1rem;">
+        <div style="font-size:0.7rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-muted); margin-bottom:0.4rem;">Prompt</div>
+        <div id="session-details-prompt" style="white-space:pre-wrap; font-family:'JetBrains Mono', monospace; font-size:0.85rem; padding:0.75rem; border-radius:var(--radius-sm); background:var(--code-bg); border:1px solid var(--border); min-height:80px;"></div>
+      </div>
+
+      <div id="session-panel-audit" style="display:none; margin-bottom:1.5rem;">
+        <div class="flex-between" style="margin-bottom:0.45rem; gap:0.75rem;">
+          <div style="font-size:0.7rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-muted);">Layer/Parameter Verification Log</div>
+          <div id="session-audit-summary" class="badge badge-neutral">Loading…</div>
+        </div>
+        <div id="session-details-audit" style="max-height:360px; overflow:auto; font-family:'JetBrains Mono', monospace; font-size:0.8rem; padding:0.75rem; border-radius:var(--radius-sm); background:var(--code-bg); border:1px solid var(--border); min-height:140px;"></div>
+      </div>
+
+      <div class="flex-between" style="gap:1rem;">
+        <button class="btn btn-ghost btn-block" onclick="closeSessionDetailsModal()">Close</button>
+      </div>
+    </div>
+  `;
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeSessionDetailsModal();
+  });
+
+  document.body.appendChild(overlay);
+
+  const tabPrompt = overlay.querySelector('#session-tab-prompt');
+  const tabAudit = overlay.querySelector('#session-tab-audit');
+  const panelPrompt = overlay.querySelector('#session-panel-prompt');
+  const panelAudit = overlay.querySelector('#session-panel-audit');
+
+  const switchTab = (tab) => {
+    const promptActive = tab === 'prompt';
+    if (panelPrompt) panelPrompt.style.display = promptActive ? '' : 'none';
+    if (panelAudit) panelAudit.style.display = promptActive ? 'none' : '';
+
+    if (tabPrompt) {
+      tabPrompt.className = promptActive ? 'btn btn-sm' : 'btn btn-sm btn-ghost';
+      tabPrompt.style.background = promptActive ? 'rgba(99,102,241,0.12)' : 'transparent';
+      tabPrompt.style.color = promptActive ? 'var(--indigo)' : 'var(--text-muted)';
+      tabPrompt.style.borderColor = promptActive ? 'rgba(99,102,241,0.28)' : 'var(--border)';
+    }
+    if (tabAudit) {
+      tabAudit.className = promptActive ? 'btn btn-sm btn-ghost' : 'btn btn-sm';
+      tabAudit.style.background = promptActive ? 'transparent' : 'rgba(16,185,129,0.12)';
+      tabAudit.style.color = promptActive ? 'var(--text-muted)' : 'var(--emerald)';
+      tabAudit.style.borderColor = promptActive ? 'var(--border)' : 'rgba(16,185,129,0.28)';
+    }
+  };
+
+  if (tabPrompt) tabPrompt.addEventListener('click', () => switchTab('prompt'));
+  if (tabAudit) tabAudit.addEventListener('click', () => switchTab('audit'));
+  overlay.__switchSessionTab = switchTab;
+
+  return overlay;
+}
+
+function closeSessionDetailsModal() {
+  const overlay = document.getElementById('session-details-modal');
+  if (overlay) overlay.classList.remove('active');
+}
+
+window.closeSessionDetailsModal = closeSessionDetailsModal;
+
+window.showSessionDetailsModal = async function(sessionId) {
+  if (!sessionId) {
+    toast('Session ID missing', 'error');
+    return;
+  }
+
+  const overlay = ensureSessionDetailsModal();
+  const title = document.getElementById('session-details-title');
+  const sub = document.getElementById('session-details-sub');
+  const metaBox = document.getElementById('session-details-meta');
+  const promptBox = document.getElementById('session-details-prompt');
+  const auditBox = document.getElementById('session-details-audit');
+  const auditSummary = document.getElementById('session-audit-summary');
+
+  const renderAuditEvent = (ev) => {
+    const status = ev?.status || 'info';
+    const icon = status === 'pass' ? '✅' : status === 'fail' ? '❌' : status === 'warn' ? '⚠️' : '•';
+    const color = status === 'pass' ? 'var(--emerald)' : status === 'fail' ? 'var(--rose)' : status === 'warn' ? 'var(--amber)' : 'var(--text-secondary)';
+    const layer = Number.isFinite(Number(ev?.layer)) ? `L${ev.layer}` : 'L?';
+    const mod = ev?.module_label || ev?.module || 'module';
+    const param = ev?.parameter ? ` · ${ev.parameter}` : '';
+    const line = ev?.line || '';
+
+    return `
+      <div style="padding:0.5rem 0.25rem; border-bottom:1px dashed var(--border);">
+        <div style="color:${color}; font-weight:700; font-size:0.75rem;">${icon} ${layer} · ${escapeHTML(String(mod))}${escapeHTML(param)}</div>
+        <div style="color:var(--text-secondary); margin-top:0.15rem; line-height:1.45;">${escapeHTML(String(line))}</div>
+      </div>
+    `;
+  };
+
+  const deriveAuditEventsFromLines = (lines = []) => {
+    return lines
+      .filter(Boolean)
+      .map((line) => {
+        const lc = String(line).toLowerCase();
+        let status = 'info';
+        if (line.includes('✅') || lc.includes(' passed') || lc.includes(' successful')) status = 'pass';
+        else if (line.includes('❌') || lc.includes(' failed') || lc.startsWith('error')) status = 'fail';
+        else if (line.includes('⚠') || lc.includes('warning') || lc.includes('skip')) status = 'warn';
+        const lm = String(line).match(/layer\s+(\d+)/i);
+        return {
+          layer: lm ? Number(lm[1]) : null,
+          module: 'verification',
+          module_label: 'Verification Runner',
+          status,
+          parameter: null,
+          line,
+        };
+      })
+      .filter((ev) => ev.status !== 'info' || /step\s+\d+|verify|proof|sumcheck|softmax|projection|zero-check/i.test(String(ev.line)));
+  };
+
+  if (title) title.textContent = 'Session Trace';
+  if (sub) sub.textContent = `Session #${sessionId}`;
+  if (metaBox) metaBox.innerHTML = '<div style="opacity:0.7; grid-column:1 / -1;">Loading metadata…</div>';
+  if (promptBox) promptBox.textContent = 'Loading prompt...';
+  if (auditBox) auditBox.innerHTML = '<div style="opacity:0.7;">Loading verification audit log…</div>';
+  if (auditSummary) {
+    auditSummary.className = 'badge badge-neutral';
+    auditSummary.textContent = 'Loading…';
+  }
+
+  if (typeof overlay.__switchSessionTab === 'function') {
+    overlay.__switchSessionTab('prompt');
+  }
+
+  overlay.classList.add('active');
+
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}`);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      const msg = data.error || 'Session not found';
+      if (metaBox) metaBox.innerHTML = `<div style="color:var(--rose); grid-column:1 / -1;">${escapeHTML(msg)}</div>`;
+      if (promptBox) promptBox.textContent = msg;
+      if (auditBox) auditBox.innerHTML = '<div style="opacity:0.7;">No audit details found.</div>';
+      if (auditSummary) {
+        auditSummary.className = 'badge badge-rose';
+        auditSummary.textContent = 'Unavailable';
+      }
+      return;
+    }
+
+    const tsFmt = formatTimestampIST(data.timestamp, { showSeconds: true });
+    const kv = (label, value) => `
+      <div style="padding:0.45rem 0.55rem; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--hover-bg);">
+        <div style="font-size:0.64rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--text-muted); margin-bottom:0.2rem;">${escapeHTML(label)}</div>
+        <div style="font-size:0.78rem; color:var(--text);">${escapeHTML(String(value ?? '—'))}</div>
+      </div>
+    `;
+
+    if (metaBox) {
+      metaBox.innerHTML = [
+        kv('Session', `#${data.id ?? sessionId}`),
+        kv('User', data.username || (data.user_id ? `user-${data.user_id}` : '—')),
+        kv('Model', data.model_id || '—'),
+        kv('Occurred (IST)', tsFmt.datetime),
+        kv('Inference Status', (data.inference_status || '—').toUpperCase()),
+        kv('Proof Status', (data.proof_status || '—').toUpperCase()),
+        kv('Proof Duration', Number.isFinite(Number(data.proof_duration)) ? `${data.proof_duration}s` : '—'),
+        kv('Verification Status', (data.verify_status || '—').toUpperCase()),
+        kv('Verification Duration', Number.isFinite(Number(data.verify_duration)) ? `${data.verify_duration}s` : '—'),
+        kv('Verification Runs', Number.isFinite(Number(data.verify_runs)) ? data.verify_runs : 0),
+        kv('Requested Verify', data.request_verify ? 'Yes' : 'No'),
+        kv('C2PA State', data.c2pa_status || '—'),
+      ].join('');
+    }
+
+    if (promptBox) promptBox.textContent = data.prompt || '(no prompt stored)';
+
+    const structured = Array.isArray(data.verify_audit) ? data.verify_audit : [];
+    const fallback = structured.length ? [] : (Array.isArray(data.verify_log) ? deriveAuditEventsFromLines(data.verify_log) : []);
+    const events = (structured.length ? structured : fallback).slice(-250);
+    const passCount = events.filter(e => e.status === 'pass').length;
+    const failCount = events.filter(e => e.status === 'fail').length;
+    const warnCount = events.filter(e => e.status === 'warn').length;
+
+    if (auditSummary) {
+      if (!events.length) {
+        auditSummary.className = 'badge badge-neutral';
+        auditSummary.textContent = 'No audit log';
+      } else if (failCount > 0) {
+        auditSummary.className = 'badge badge-rose';
+        auditSummary.textContent = `${passCount} pass · ${failCount} fail · ${warnCount} warn`;
+      } else {
+        auditSummary.className = 'badge badge-success';
+        auditSummary.textContent = `${passCount} pass · ${warnCount} warn`;
+      }
+    }
+
+    if (auditBox) {
+      if (!events.length) {
+        auditBox.innerHTML = '<div style="opacity:0.7;">No layer/parameter verification log available for this session yet.</div>';
+      } else {
+        const byLayerParam = new Map();
+        for (const ev of events) {
+          const layer = Number.isFinite(Number(ev?.layer)) ? `L${ev.layer}` : 'L?';
+          const bucket = ev?.parameter || ev?.module_label || ev?.module || 'general';
+          const key = `${layer}::${bucket}`;
+          if (!byLayerParam.has(key)) {
+            byLayerParam.set(key, { layer, bucket, pass: 0, fail: 0, warn: 0 });
+          }
+          const row = byLayerParam.get(key);
+          if (ev?.status === 'pass') row.pass += 1;
+          else if (ev?.status === 'fail') row.fail += 1;
+          else if (ev?.status === 'warn') row.warn += 1;
+        }
+
+        const summaryRows = Array.from(byLayerParam.values()).sort((a, b) => {
+          const la = Number((a.layer || 'L0').replace('L', ''));
+          const lb = Number((b.layer || 'L0').replace('L', ''));
+          if (la !== lb) return la - lb;
+          return String(a.bucket).localeCompare(String(b.bucket));
+        }).slice(0, 120);
+
+        const summaryHtml = `
+          <div style="margin-bottom:0.75rem; padding:0.6rem; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--hover-bg);">
+            <div style="font-size:0.66rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:0.35rem;">Layer/Parameter Pass-Fail Summary</div>
+            ${summaryRows.map(r => `
+              <div style="display:flex; justify-content:space-between; gap:0.75rem; font-size:0.74rem; padding:0.2rem 0; border-bottom:1px dashed var(--border);">
+                <span style="color:var(--text);">${escapeHTML(r.layer)} · ${escapeHTML(String(r.bucket))}</span>
+                <span style="white-space:nowrap; color:var(--text-secondary);">✅ ${r.pass} · ❌ ${r.fail} · ⚠️ ${r.warn}</span>
+              </div>
+            `).join('')}
+          </div>
+        `;
+
+        auditBox.innerHTML = summaryHtml + events.map(renderAuditEvent).join('');
+      }
+    }
+  } catch (err) {
+    if (metaBox) metaBox.innerHTML = '<div style="color:var(--rose); grid-column:1 / -1;">Failed to load metadata.</div>';
+    if (promptBox) promptBox.textContent = 'Failed to load session.';
+    if (auditBox) auditBox.innerHTML = '<div style="color:var(--rose);">Failed to load audit details.</div>';
+    if (auditSummary) {
+      auditSummary.className = 'badge badge-rose';
+      auditSummary.textContent = 'Load failed';
+    }
+  }
+};
+
+function stopVerifyFastWatcher() {
+  if (window.__VERIFY_FAST_WATCHER__) {
+    clearInterval(window.__VERIFY_FAST_WATCHER__);
+    window.__VERIFY_FAST_WATCHER__ = null;
+  }
+}
+
+function startVerifyFastWatcher() {
+  stopVerifyFastWatcher();
+  const startedAt = Date.now();
+  window.__VERIFY_FAST_WATCHER__ = setInterval(async () => {
+    try {
+      const resp = await fetch('/api/verify/status', { cache: 'no-store' });
+      const data = await resp.json();
+      if (!data.active) {
+        stopVerifyFastWatcher();
+        setVerifierControls(false);
+        refreshLedgerNow({ syncVerifierState: true });
+        // Catch DB/write races when verification ends very quickly.
+        setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 350);
+        setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 1200);
+      }
+      if (Date.now() - startedAt > 120000) {
+        stopVerifyFastWatcher();
+      }
+    } catch (_) {}
+  }, 600);
+}
+
+// ---------------------------------------------------------------------------
+// Proof Progress UI Helpers
+// ---------------------------------------------------------------------------
+const PROOF_MODULES = ['input_rmsnorm','self_attn','post_attn_rmsnorm','ffn','skip_connection'];
+const PROOF_MODULE_KEYWORDS = {
+  'input_rmsnorm':     ['Input RMSNorm', 'input rmsnorm', 'Input Norm'],
+  'self_attn':         ['Self-Attention', 'self attention', 'Self Attn'],
+  'post_attn_rmsnorm': ['Post-Attn', 'post_attention', 'Post Attn', 'Post-Attention'],
+  'ffn':               ['Feed-Forward', 'FFN', 'Feed Forward'],
+  'skip_connection':   ['Skip Connection', 'Skip'],
+};
+const PROOF_PILL_STYLES = {
+  active: 'background:rgba(245,158,11,0.15);border-color:rgba(245,158,11,0.4);color:var(--amber);font-weight:700;',
+  done:   'background:rgba(16,185,129,0.12);border-color:rgba(16,185,129,0.35);color:var(--emerald);',
+  failed: 'background:rgba(244,63,94,0.12);border-color:rgba(244,63,94,0.35);color:var(--rose);font-weight:700;'
+};
+
+function hasProofModulePills() {
+  return !!document.getElementById('proof-module-pills');
+}
+
+function findProofModuleKey(component) {
+  if (!component) return null;
+  const lc = component.toLowerCase();
+  for (const key of PROOF_MODULES) {
+    const kws = PROOF_MODULE_KEYWORDS[key] || [];
+    if (kws.some(k => lc.includes(k.toLowerCase()))) return key;
+  }
+  return null;
+}
+
+function setProofPillState(key, state) {
+  const pill = document.getElementById(`pmp-${key}`);
+  if (!pill) return;
+  pill.style.cssText = state ? (PROOF_PILL_STYLES[state] || '') : '';
+}
+
+function resetProofModulePills() {
+  if (!hasProofModulePills()) return;
+  PROOF_MODULES.forEach(key => setProofPillState(key, null));
+}
+
+function updateProofModulePills(component) {
+  if (!hasProofModulePills()) return;
+  const key = findProofModuleKey(component);
+  if (!key) return;
+  let found = false;
+  PROOF_MODULES.forEach(k2 => {
+    const pill = document.getElementById(`pmp-${k2}`);
+    if (!pill) return;
+    if (k2 === key) {
+      found = true;
+      setProofPillState(k2, 'active');
+    } else if (!found) {
+      setProofPillState(k2, 'done');
+    }
+  });
+}
+
+function markProofModuleResult(component, success) {
+  if (!hasProofModulePills()) return;
+  const key = findProofModuleKey(component);
+  if (!key) return;
+  setProofPillState(key, success ? 'done' : 'failed');
+}
+
+function setProofBadgeState(state) {
+  const gen = document.getElementById('bdg-gen');
+  const ver = document.getElementById('bdg-ver');
+  const fail = document.getElementById('bdg-fail');
+  const showGen = state === 'running' || state === 'partial';
+  const showFail = state === 'failed' || state === 'partial';
+  if (gen) gen.classList.toggle('hidden', !showGen);
+  if (ver) ver.classList.toggle('hidden', state !== 'success');
+  if (fail) fail.classList.toggle('hidden', !showFail);
+}
+
+function formatProofStatusText(layer, total, component, showComponents) {
+  if (showComponents && component) return `L${layer}/${total} — ${component}`;
+  if (Number.isFinite(layer) && Number.isFinite(total)) return `Layer ${layer} / ${total} in progress`;
+  if (Number.isFinite(layer)) return `Layer ${layer} in progress`;
+  return 'Generating proof…';
+}
+
+function getProofRangeEnd(startLayer, totalLayers, explicitEndLayer) {
+  if (Number.isFinite(explicitEndLayer)) return explicitEndLayer;
+  if (Number.isFinite(startLayer) && Number.isFinite(totalLayers)) {
+    return Math.max(startLayer + totalLayers - 1, startLayer);
+  }
+  const fallbackTotal = Number.isFinite(totalLayers) ? totalLayers : getLayerCountForModel(getSelectedModelId());
+  return Math.max((fallbackTotal || 1) - 1, 0);
+}
+
+function renderProofState(data, options = {}) {
+  if (!data) return;
+  const showComponents = options.showComponents ?? false;
+  const updateBadge = options.updateBadge ?? false;
+  const badgeId = options.badgeId || 'verifier-status-badge';
+  const showOnlyWhenActive = options.showOnlyWhenActive ?? false;
+
+  const box = document.getElementById('proof-progress-box');
+  const hasState = data.active || data.progress > 0 || data.success === false || data.success === true;
+  if (!box) return;
+  if (!hasState || (showOnlyWhenActive && !data.active)) {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+
+  const total = Number.isFinite(data.total_layers) ? data.total_layers : getLayerCountForModel(getSelectedModelId());
+  const startLayer = Number.isFinite(data.start_layer) ? data.start_layer : 0;
+  const endLayer = getProofRangeEnd(startLayer, total, data.end_layer);
+  const layer = Number.isFinite(data.current_layer) ? data.current_layer : 0;
+  const component = data.current_component || '';
+
+  const fill = document.getElementById('proof-pb-fill');
+  const text = document.getElementById('proof-status-text');
+  const layerInfo = document.getElementById('proof-layer-info');
+  const pctLabel = document.getElementById('proof-pct-label');
+  const pct = typeof data.progress === 'number' ? data.progress : 0;
+
+  if (fill) fill.style.width = `${Math.max(0, Math.min(pct, 100))}%`;
+  if (layerInfo) layerInfo.textContent = `Layer ${layer} / ${endLayer}`;
+  if (pctLabel) pctLabel.textContent = pct >= 0 ? `${pct}%` : 'Failed';
+
+  if (data.active) {
+    setProofBadgeState('running');
+    if (text) text.textContent = formatProofStatusText(layer, endLayer, component, showComponents);
+    if (showComponents) updateProofModulePills(component);
+    if (updateBadge) {
+      const badge = document.getElementById(badgeId);
+      if (badge) {
+        badge.innerHTML = `<span class="dot" style="background:var(--amber)"></span> Generating Proof (${Math.round(pct)}%)`;
+        badge.className = 'badge badge-warning';
+      }
+    }
+  } else if (data.success === false || pct < 0) {
+    setProofBadgeState('failed');
+    if (text) text.textContent = '✗ Proof generation failed';
+    if (updateBadge) {
+      const badge = document.getElementById(badgeId);
+      if (badge) {
+        badge.innerHTML = `<span class="dot" style="background:var(--rose)"></span> Proof Failed`;
+        badge.className = 'badge badge-rose';
+      }
+    }
+  } else {
+    setProofBadgeState('success');
+    if (text) text.textContent = '✓ Proof complete';
+    if (updateBadge) {
+      const badge = document.getElementById(badgeId);
+      if (badge) {
+        badge.innerHTML = `<span class="dot" style="background:var(--emerald)"></span> Proof Ready`;
+        badge.className = 'badge badge-success';
+      }
+    }
+  }
+}
+
+function bindProofProgressHandlers(options = {}) {
+  if (!socket) return;
+  const showComponents = options.showComponents ?? false;
+  const updateBadge = options.updateBadge ?? false;
+  const badgeId = options.badgeId || 'verifier-status-badge';
+  const startBtn = options.startBtn || null;
+  const filterToSession = options.filterToSession ?? false;
+  const showOnlyWhenActive = options.showOnlyWhenActive ?? false;
+  let lastLayer = null;
+  let lastPercent = -1;
+  let hasProofFailure = false;
+
+  const shouldHandleProofEvent = (data) => {
+    if (!filterToSession) return true;
+    if (!data) return false;
+    if (!window.__PROOF_SESSION_ID__) {
+      if (data.session_id) window.__PROOF_SESSION_ID__ = data.session_id;
+      return true;
+    }
+    if (!data.session_id) return true;
+    return String(window.__PROOF_SESSION_ID__) === String(data.session_id);
+  };
+
+  socket.off('proof_progress').on('proof_progress', (data) => {
+    if (!shouldHandleProofEvent(data)) return;
+    const box = document.getElementById('proof-progress-box');
+    if (box) box.classList.remove('hidden');
+    const total = Number.isFinite(data.total) ? data.total : getLayerCountForModel(getSelectedModelId());
+    const startLayer = Number.isFinite(data.start_layer) ? data.start_layer : 0;
+    const endLayer = getProofRangeEnd(startLayer, total, data.end_layer);
+    const layer = Number.isFinite(data.layer) ? data.layer : 0;
+    const component = data.component || '';
+
+    const fill = document.getElementById('proof-pb-fill');
+    const text = document.getElementById('proof-status-text');
+    const layerInfo = document.getElementById('proof-layer-info');
+    const pctLabel = document.getElementById('proof-pct-label');
+    if (typeof data.percent === 'number' && data.percent < lastPercent) {
+      hasProofFailure = false;
+    }
+    lastPercent = typeof data.percent === 'number' ? data.percent : lastPercent;
+    if (fill) fill.style.width = `${data.percent}%`;
+    let statusText = formatProofStatusText(layer, endLayer, component, showComponents);
+    if (hasProofFailure) statusText += ' — errors detected';
+    if (text) text.textContent = statusText;
+    if (layerInfo) layerInfo.textContent = `Layer ${layer} / ${endLayer}`;
+    if (pctLabel) pctLabel.textContent = `${data.percent}%`;
+    setProofBadgeState(hasProofFailure ? 'partial' : 'running');
+
+    if (startBtn) startBtn.disabled = true;
+    if (updateBadge) {
+      const badge = document.getElementById(badgeId);
+      if (badge) {
+        if (hasProofFailure) {
+          badge.innerHTML = `<span class="dot" style="background:var(--rose)"></span> Proof Errors Detected`;
+          badge.className = 'badge badge-rose';
+        } else {
+          badge.innerHTML = `<span class="dot" style="background:var(--amber)"></span> Generating Proof (${data.percent}%)`;
+          badge.className = 'badge badge-warning';
+        }
+      }
+    }
+
+    if (showComponents && layer !== lastLayer) {
+      lastLayer = layer;
+      resetProofModulePills();
+    }
+    if (showComponents) updateProofModulePills(component);
+  });
+
+  socket.off('proof_component_done').on('proof_component_done', (data) => {
+    if (!shouldHandleProofEvent(data)) return;
+    if (!data.success) {
+      hasProofFailure = true;
+      setProofBadgeState('partial');
+      if (updateBadge) {
+        const badge = document.getElementById(badgeId);
+        if (badge) {
+          badge.innerHTML = `<span class="dot" style="background:var(--rose)"></span> Proof Errors Detected`;
+          badge.className = 'badge badge-rose';
+        }
+      }
+    }
+    if (showComponents) markProofModuleResult(data.component, data.success);
+  });
+
+  socket.off('proof_complete').on('proof_complete', (data) => {
+    if (!shouldHandleProofEvent(data)) return;
+    hasProofFailure = false;
+    lastPercent = -1;
+    const success = !!data.success;
+    setProofBadgeState(success ? 'success' : 'failed');
+    const text = document.getElementById('proof-status-text');
+    const pctLabel = document.getElementById('proof-pct-label');
+    const fill = document.getElementById('proof-pb-fill');
+    if (text) text.textContent = success
+      ? `✓ Proof complete in ${(data.elapsed || data.duration || 0).toFixed(1)}s`
+      : '✗ Proof generation failed';
+    if (pctLabel) pctLabel.textContent = success ? '100%' : 'Failed';
+    if (fill && success) fill.style.width = '100%';
+
+    if (showComponents && success) {
+      PROOF_MODULES.forEach(key => setProofPillState(key, 'done'));
+    }
+    if (startBtn) startBtn.disabled = false;
+    if (updateBadge) {
+      const badge = document.getElementById(badgeId);
+      if (badge) {
+        if (success) {
+          badge.innerHTML = `<span class="dot" style="background:var(--emerald)"></span> Proof Ready`;
+          badge.className = 'badge badge-success';
+        } else {
+          badge.innerHTML = `<span class="dot" style="background:var(--rose)"></span> Proof Failed`;
+          badge.className = 'badge badge-rose';
+        }
+      }
+    }
+    if (showOnlyWhenActive) {
+      const box = document.getElementById('proof-progress-box');
+      if (box) box.classList.add('hidden');
+    }
+    if (typeof loadSessions === 'function') loadSessions();
+  });
 }
 
 
@@ -252,9 +985,7 @@ async function initProvider() {
   const refBtn = document.getElementById('refresh-sessions-btn');
   if (refBtn) {
     refBtn.addEventListener('click', () => {
-      const mid = document.getElementById('model-select')?.value;
-      loadSessions(mid);
-      restoreProofState();  // Also re-check running state on manual refresh
+      refreshLedgerNow({ syncProofState: true });
     });
   }
   
@@ -275,26 +1006,27 @@ async function restoreProofState() {
     const resp = await fetch('/api/proof/status');
     if (!resp.ok) return;
     const data = await resp.json();
-    if (!data.active) return;
+    const hasState = data.active || data.progress > 0 || data.success === false || data.success === true;
+    const isUserView = window.location.pathname.includes('/user') || window.location.pathname.includes('/dashboard/user');
+    if (!hasState || (isUserView && !data.active)) {
+      document.getElementById('proof-progress-box')?.classList.add('hidden');
+      return;
+    }
 
-    // A proof job is running — restore the UI
-    const pbBox = document.getElementById('proof-progress-box');
-    const fill  = document.getElementById('proof-pb-fill');
-    const text  = document.getElementById('proof-status-text');
-    const pct   = document.getElementById('proof-pct-label');
-    const li    = document.getElementById('proof-layer-info');
+    if (isUserView && data.session_id) {
+      try {
+        const check = await fetch(`/api/sessions/${data.session_id}`);
+        if (check.ok) window.__PROOF_SESSION_ID__ = data.session_id;
+      } catch (_) {}
+      if (!window.__PROOF_SESSION_ID__) window.__PROOF_SESSION_ID__ = data.session_id;
+    }
+
+    renderProofState(data, { showComponents: hasProofModulePills() });
     const genBtn = document.getElementById('generate-proof-btn');
-
-    if (pbBox) pbBox.classList.remove('hidden');
-    if (fill)  fill.style.width = `${data.progress || 0}%`;
-    if (text)  text.textContent  = `L${data.current_layer || 0}/32 — ${data.current_component || '...'}`;
-    if (pct)   pct.textContent   = `${data.progress || 0}%`;
-    if (li)    li.textContent    = `Layer ${data.current_layer || 0} / 32`;
-    if (genBtn) {
+    if (genBtn && data.active) {
       genBtn.disabled = true;
       genBtn.innerHTML = '<span class="spinner-sm"></span> Generating Proof...';
     }
-    document.getElementById('bdg-gen')?.classList.remove('hidden');
   } catch (_) { /* silently ignore if endpoint unavailable */ }
 }
 
@@ -345,17 +1077,23 @@ async function loadActivity() {
             return;
         }
 
-        body.innerHTML = data.activity.map(a => `
-            <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
-                <td style="padding:0.75rem; font-weight:600; font-size: 0.9rem;">@${a.username}</td>
-                <td style="padding:0.75rem;">
-                    <div class="badge badge-${a.inference_status === 'verified' ? 'success' : (a.inference_status === 'running' ? 'warning' : 'neutral')}" style="font-size: 0.7rem;">
-                        ${a.inference_status}
-                    </div>
-                </td>
-                <td style="padding:0.75rem; font-size:0.75rem; opacity:0.6; text-align: right;">${new Date(a.timestamp).toLocaleTimeString()}</td>
-            </tr>
-        `).join('');
+        body.innerHTML = data.activity.map(a => {
+          const ts = formatTimestampIST(a.timestamp, { showSeconds: false });
+          return `
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+            <td style="padding:0.75rem; font-weight:600; font-size: 0.9rem;">@${a.username}</td>
+            <td style="padding:0.75rem;">
+              <div class="badge badge-${a.inference_status === 'verified' ? 'success' : (a.inference_status === 'running' ? 'warning' : 'neutral')}" style="font-size: 0.7rem;">
+                ${a.inference_status}
+              </div>
+            </td>
+            <td style="padding:0.75rem; font-size:0.75rem; opacity:0.8; text-align: right; line-height:1.25;">
+              <div style="font-weight:700;">${ts.time}</div>
+              <div style="opacity:0.65;">${ts.date}</div>
+            </td>
+          </tr>
+        `;
+        }).join('');
     } catch (err) {}
 }
 
@@ -396,11 +1134,18 @@ async function initUser() {
   await loadModelsDropdown();
   const form = document.getElementById('prompt-form');
   if (form) form.addEventListener('submit', handlePromptSubmit);
-  
-  const refBtn = document.getElementById('refresh-sessions-btn');
-  if (refBtn) refBtn.addEventListener('click', () => loadSessions());
+
+  ['refresh-sessions-btn', 'refresh-history-btn'].forEach((id) => {
+    const btn = document.getElementById(id);
+    if (btn) {
+      btn.addEventListener('click', () => {
+        refreshLedgerNow({ syncProofState: true });
+      });
+    }
+  });
 
   loadSessions();
+  restoreProofState();
   
   const genBtn = document.getElementById('generate-proof-btn');
   if (genBtn) {
@@ -412,16 +1157,22 @@ async function initUser() {
       if (pbBox) pbBox.classList.remove('hidden');
       
       const activeModelId = document.getElementById('model-select').value;
+      const totalLayers = getLayerCountForModel(activeModelId);
+      const sessionId = window.__LAST_SESSION_ID__ || window.__PROOF_SESSION_ID__;
+      if (sessionId) window.__PROOF_SESSION_ID__ = sessionId;
       
       fetch('/api/proof/start', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ 
           model: activeModelId,
+          session_id: sessionId || undefined,
           start_layer: 0,
-          end_layer: 31  // always run all 32 layers
+          end_layer: totalLayers - 1
         })
-      });
+      }).then(res => res.json()).then(data => {
+        if (data && data.session_id) window.__PROOF_SESSION_ID__ = data.session_id;
+      }).catch(() => {});
     });
   }
   
@@ -483,92 +1234,7 @@ async function initUser() {
       setTimeout(() => loadSessions(), 1000);
     });
 
-    const PROOF_MODULES = ['input_rmsnorm','self_attn','post_attn_rmsnorm','ffn','skip_connection'];
-    const PROOF_MODULE_KEYWORDS = {
-      'input_rmsnorm':     ['Input RMSNorm', 'input rmsnorm', 'Input Norm'],
-      'self_attn':         ['Self-Attention', 'self attention', 'Self Attn'],
-      'post_attn_rmsnorm': ['Post-Attn', 'post_attention', 'Post Attn', 'Post-Attention'],
-      'ffn':               ['Feed-Forward', 'FFN', 'Feed Forward'],
-      'skip_connection':   ['Skip Connection', 'Skip'],
-    };
-
-    function updateProofModulePills(component) {
-      if (!component) return;
-      PROOF_MODULES.forEach(key => {
-        const pill = document.getElementById(`pmp-${key}`);
-        if (!pill) return;
-        const keywords = PROOF_MODULE_KEYWORDS[key] || [];
-        const isMatch = keywords.some(k => component.toLowerCase().includes(k.toLowerCase()));
-        if (isMatch) {
-          // Mark previous ones done
-          let found = false;
-          PROOF_MODULES.forEach(k2 => {
-            const p2 = document.getElementById(`pmp-${k2}`);
-            if (!p2) return;
-            if (k2 === key) { found = true; p2.style.cssText = 'background:rgba(245,158,11,0.15);border-color:rgba(245,158,11,0.4);color:var(--amber);font-weight:700;'; }
-            else if (!found) { p2.style.cssText = 'background:rgba(16,185,129,0.12);border-color:rgba(16,185,129,0.35);color:var(--emerald);'; }
-          });
-        }
-      });
-    }
-
-    let _lastProofLayer = -1;
-    socket.on('proof_progress', (data) => {
-      document.getElementById('proof-progress-box')?.classList.remove('hidden');
-      const fill = document.getElementById('proof-pb-fill');
-      const text = document.getElementById('proof-status-text');
-      const layerInfo = document.getElementById('proof-layer-info');
-      const pctLabel = document.getElementById('proof-pct-label');
-      if (fill) fill.style.width = `${data.percent}%`;
-      if (text) text.textContent = `L${data.layer}/${data.total} — ${data.component}`;
-      if (layerInfo) layerInfo.textContent = `Layer ${data.layer} / ${data.total}`;
-      if (pctLabel) pctLabel.textContent = `${data.percent}%`;
-      document.getElementById('bdg-gen')?.classList.remove('hidden');
-
-      // Reset pills on new layer
-      if (data.layer !== _lastProofLayer) {
-        _lastProofLayer = data.layer;
-        PROOF_MODULES.forEach(k => {
-          const pill = document.getElementById(`pmp-${k}`);
-          if (pill) pill.style.cssText = '';
-        });
-      }
-      updateProofModulePills(data.component);
-    });
-
-    socket.on('proof_component_done', (data) => {
-      if (data.success) {
-        const key = PROOF_MODULES.find(k => {
-          const kws = PROOF_MODULE_KEYWORDS[k] || [];
-          return kws.some(kw => (data.component||'').toLowerCase().includes(kw.toLowerCase()));
-        });
-        if (key) {
-          const pill = document.getElementById(`pmp-${key}`);
-          if (pill) pill.style.cssText = 'background:rgba(16,185,129,0.12);border-color:rgba(16,185,129,0.35);color:var(--emerald);';
-        }
-      }
-    });
-
-    socket.on('proof_complete', (data) => {
-      document.getElementById('bdg-gen')?.classList.add('hidden');
-      document.getElementById('bdg-ver')?.classList.remove('hidden');
-      const text = document.getElementById('proof-status-text');
-      const pctLabel = document.getElementById('proof-pct-label');
-      const fill = document.getElementById('proof-pb-fill');
-      if (text) text.textContent = data.success
-        ? `✓ Proof complete in ${(data.elapsed||data.duration||0).toFixed(1)}s`
-        : '✗ Proof generation failed';
-      if (pctLabel) pctLabel.textContent = data.success ? '100%' : 'Failed';
-      if (fill && data.success) fill.style.width = '100%';
-      // All pills green on success
-      if (data.success) {
-        PROOF_MODULES.forEach(key => {
-          const pill = document.getElementById(`pmp-${key}`);
-          if (pill) pill.style.cssText = 'background:rgba(16,185,129,0.12);border-color:rgba(16,185,129,0.35);color:var(--emerald);';
-        });
-      }
-      if (typeof loadSessions === 'function') loadSessions();
-    });
+    bindProofProgressHandlers({ showComponents: false, filterToSession: true });
   }
 }
 
@@ -605,6 +1271,9 @@ async function handlePromptSubmit(e) {
     }
 
     const data = await res.json();
+    if (data && data.session_id) {
+      window.__LAST_SESSION_ID__ = data.session_id;
+    }
     toast("Inference started in background", "info");
     
     // Add logic to show a loading state in chat
@@ -656,6 +1325,25 @@ function appendTerminal(id, line) {
 // =====================================================================
 // VERIFIER PORTAL
 // =====================================================================
+function setVerifierControls(isVerifying, { preserveIdleLabel = false } = {}) {
+  const startBtn = document.getElementById('start-verify-btn');
+  const stopBtn = document.getElementById('stop-verify-btn');
+
+  if (startBtn) {
+    startBtn.disabled = !!isVerifying;
+    if (isVerifying) {
+      startBtn.innerHTML = '<span class="spinner-sm"></span> Verifying...';
+    } else if (!preserveIdleLabel) {
+      startBtn.innerHTML = 'Trigger Verification';
+    }
+  }
+
+  if (stopBtn) {
+    stopBtn.disabled = !isVerifying;
+    stopBtn.classList.toggle('hidden', !isVerifying);
+  }
+}
+
 async function initVerifier() {
   await loadModelsDropdown();
   const startBtn = document.getElementById('start-verify-btn');
@@ -663,9 +1351,14 @@ async function initVerifier() {
   
   if (startBtn) startBtn.addEventListener('click', startVerification);
   if (stopBtn)  stopBtn.addEventListener('click', () => stopProcess('verify'));
+  setVerifierControls(false, { preserveIdleLabel: true });
   
   const refBtn = document.getElementById('refresh-sessions-btn');
-  if (refBtn) refBtn.addEventListener('click', loadSessions);
+  if (refBtn) {
+    refBtn.addEventListener('click', () => {
+      refreshLedgerNow({ syncVerifierState: true });
+    });
+  }
   
   loadVerifierState();
   loadSessions();
@@ -677,20 +1370,7 @@ async function initVerifier() {
       if (term) appendTerminal('proof-terminal', `[TRACE] ${data.line}`);
     });
 
-    socket.on('proof_progress', (data) => {
-      const badge = document.getElementById('verifier-status-badge');
-      if (badge) badge.innerHTML = `<span class="dot" style="background:var(--amber)"></span> Generating Proof (${data.percent}%)`;
-      if (startBtn) startBtn.disabled = true;
-    });
-
-    socket.on('proof_complete', (data) => {
-      const badge = document.getElementById('verifier-status-badge');
-      if (badge) {
-          badge.innerHTML = `<span class="dot" style="background:var(--emerald)"></span> Proof Ready`;
-          badge.className = 'badge badge-success';
-      }
-      if (startBtn) startBtn.disabled = false;
-    });
+    bindProofProgressHandlers({ showComponents: true, updateBadge: true, startBtn, showOnlyWhenActive: true });
 
     // --- Verify Log Handling ---
     socket.on('verify_log', (data) => {
@@ -703,15 +1383,16 @@ async function initVerifier() {
       if (term) appendTerminal('verify-terminal', `[RESULT] ${data.line || (data.component + ': ' + (data.passed ? 'PASSED' : 'FAILED'))}`, data.passed ? 'success' : 'error');
     });
     socket.on('verify_complete',  (data) => {
-      if (startBtn) {
-          startBtn.disabled = false;
-          startBtn.innerHTML = 'Trigger Verification Sync';
-      }
-      if (stopBtn) stopBtn.disabled = true;
+      setVerifierControls(false);
+      stopVerifyFastWatcher();
       
-      if (data.success) toast(`Verification Passed! (${data.duration.toFixed(1)}s)`, 'success');
+      const elapsed = Number(data?.elapsed ?? data?.duration ?? 0);
+      if (data.success) toast(`Verification Passed! (${elapsed.toFixed(1)}s)`, 'success');
       else toast('Verification Failed!', 'error');
       if (typeof loadSessions === 'function') loadSessions();
+      refreshLedgerNow({ syncVerifierState: true });
+      setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 300);
+      setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 1200);
     });
   }
 }
@@ -730,44 +1411,43 @@ async function loadVerifierState() {
   try {
     const prRes = await fetch('/api/proof/status');
     const pData = await prRes.json();
-    const badge = document.getElementById('verifier-status-badge');
     const startBtn = document.getElementById('start-verify-btn');
+    const proofRunning = !!pData.active;
 
-    if (pData.active || pData.progress > 0) {
-      if (pData.active) {
-        if (badge) badge.innerHTML = `<span class="dot" style="background:var(--amber)"></span> Generating Proof (${Math.round(pData.progress)}%)`;
-        if (startBtn) startBtn.disabled = true;
-      } else {
-        if (badge) {
-            badge.innerHTML = `<span class="dot" style="background:var(--emerald)"></span> Proof Ready`;
-            badge.className = 'badge badge-success';
-        }
-        if (startBtn) startBtn.disabled = false;
-      }
-      if (pData.log_tail) {
-          clearTerminal('proof-terminal');
-          pData.log_tail.forEach(l => appendTerminal('proof-terminal', `[TRACE] ${l}`));
-      }
+    renderProofState(pData, { showComponents: true, updateBadge: true, showOnlyWhenActive: true });
+    if (startBtn) startBtn.disabled = proofRunning;
+    if (pData.log_tail) {
+        clearTerminal('proof-terminal');
+        pData.log_tail.forEach(l => appendTerminal('proof-terminal', `[TRACE] ${l}`));
     }
     
     const vRes = await fetch('/api/verify/status');
     const vData = await vRes.json();
+    const wasRunning = !!window.__VERIFY_ACTIVE_LAST__;
     if (vData.active || vData.success !== null) {
       if (vData.log_tail) {
         clearTerminal('verify-terminal');
         vData.log_tail.forEach(l => appendTerminal('verify-terminal', `[AUDIT] ${l}`));
       }
-      if (startBtn) {
-        if (vData.active) {
-            startBtn.disabled = true;
-            startBtn.innerHTML = '<span class="spinner-sm"></span> Verifying...';
-            document.getElementById('stop-verify-btn')?.removeAttribute('disabled');
-        } else {
-            startBtn.disabled = false;
-            startBtn.innerHTML = 'Trigger Verification Sync';
-            document.getElementById('stop-verify-btn')?.setAttribute('disabled', 'true');
+      if (vData.active) {
+        window.__VERIFY_ACTIVE_LAST__ = true;
+        setVerifierControls(true);
+        startVerifyFastWatcher();
+      } else {
+        window.__VERIFY_ACTIVE_LAST__ = false;
+        setVerifierControls(false);
+        stopVerifyFastWatcher();
+        if (wasRunning) {
+          refreshLedgerNow({ syncVerifierState: true });
+          setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 400);
         }
+        if (proofRunning && startBtn) startBtn.disabled = true;
       }
+    } else {
+      window.__VERIFY_ACTIVE_LAST__ = false;
+      setVerifierControls(false, { preserveIdleLabel: true });
+      stopVerifyFastWatcher();
+      if (proofRunning && startBtn) startBtn.disabled = true;
     }
   } catch (_) {}
 }
@@ -778,11 +1458,7 @@ async function startVerification(passedSid = null) {
   if (!sid) return toast('Please select or enter a Session ID', 'info');
 
   showLayerModal(sid, 'verify', async (sessionId, start, end) => {
-    const startBtn = document.getElementById('start-verify-btn');
-    const stopBtn  = document.getElementById('stop-verify-btn');
-    
-    if (startBtn) { startBtn.disabled = true; startBtn.innerHTML = '<span class="spinner-sm"></span> Auditing...'; }
-    if (stopBtn) stopBtn.disabled = false;
+    setVerifierControls(true);
 
     clearTerminal('proof-terminal');
     clearTerminal('verify-terminal');
@@ -801,11 +1477,18 @@ async function startVerification(passedSid = null) {
       const data = await res.json();
       if (!data.success) {
           toast(data.error || 'Failed to start verification', 'error');
-          if (startBtn) { startBtn.disabled = false; startBtn.innerHTML = 'Trigger Verification'; }
+          setVerifierControls(false);
+          stopVerifyFastWatcher();
+      } else {
+          toast('Verification started', 'success');
+          window.__VERIFY_ACTIVE_LAST__ = true;
+          startVerifyFastWatcher();
+          startLedgerAutoRefresh(90000, 2000, { syncVerifierState: true });
       }
     } catch (e) {
       toast('Network error starting verification', 'error');
-      if (startBtn) { startBtn.disabled = false; startBtn.innerHTML = 'Trigger Verification'; }
+      setVerifierControls(false);
+      stopVerifyFastWatcher();
     }
   });
 }
@@ -814,6 +1497,50 @@ async function startVerification(passedSid = null) {
 async function startRegeneration(sid) {
     showLayerModal(sid, 'proof', async (sessionId, start, end) => {
         toast(`Regenerating proof for session #${sessionId}...`, 'info');
+        
+        let proofBox = document.getElementById('proof-progress-box');
+        if (proofBox) {
+            proofBox.classList.remove('hidden');
+            proofBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+            const template = `
+                <div id="proof-progress-box" class="card" style="position:fixed; top:20%; left:50%; transform:translateX(-50%); width:400px; z-index:9999; box-shadow:0 10px 30px rgba(0,0,0,0.5); border-color: rgba(99,102,241,0.5);">
+                    <div class="flex-between" style="margin-bottom: 0.75rem;">
+                        <div style="display:flex; align-items:center; gap:0.5rem; font-weight: 600; font-size:0.9rem;">
+                            <svg viewBox="0 0 24 24" style="color:var(--indigo); width: 1.1rem; flex-shrink:0;" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6M3 12a9 9 0 0115-6.7L21 8M3 22v-6h6M21 12a9 9 0 01-15 6.7L3 16"/></svg>
+                            ZK Proof Generation
+                        </div>
+                        <div style="display:flex; gap:0.5rem; align-items:center;">
+                            <div id="bdg-gen" class="badge badge-warning"><span class="dot" style="background:currentColor"></span> Generating</div>
+                            <div id="bdg-ver" class="badge badge-success hidden">✓ Complete</div>
+                          <div id="bdg-fail" class="badge badge-rose hidden">✗ Failed</div>
+                        </div>
+                    </div>
+                    <div id="proof-module-pills" style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.75rem;">
+                        <span class="proof-module-pill" id="pmp-input_rmsnorm" data-label="Input Norm">📐 Input Norm</span>
+                        <span class="proof-module-pill" id="pmp-self_attn" data-label="Self-Attn">🧠 Self-Attn</span>
+                        <span class="proof-module-pill" id="pmp-post_attn_rmsnorm" data-label="Post Norm">📏 Post Norm</span>
+                        <span class="proof-module-pill" id="pmp-ffn" data-label="FFN">⚡ FFN</span>
+                        <span class="proof-module-pill" id="pmp-skip_connection" data-label="Skip">🔗 Skip</span>
+                    </div>
+                    <p id="proof-status-text" class="text-secondary" style="font-family:'JetBrains Mono',monospace; font-size:0.75rem; margin-bottom: 0.5rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Waiting for proof generation…</p>
+                    <div class="progress-wrap">
+                        <div class="progress-bar">
+                            <div id="proof-pb-fill" class="progress-fill" style="width:0%;"></div>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">
+                        <span id="proof-layer-info">Layer — / —</span>
+                        <span id="proof-pct-label">0%</span>
+                    </div>
+                    <button class="btn btn-sm btn-ghost btn-block" style="margin-top:1rem;" onclick="this.closest('#proof-progress-box').remove()">✕ Hide Tracker</button>
+                 </div>
+            `;
+            const div = document.createElement('div');
+            div.innerHTML = template;
+            document.body.appendChild(div.firstElementChild);
+        }
+
         try {
             const res = await fetch('/api/proof/start', {
                 method: 'POST',
@@ -829,6 +1556,7 @@ async function startRegeneration(sid) {
                 toast(data.error || 'Failed to start regeneration', 'error');
             } else {
                 toast('Proof regeneration started', 'success');
+              startLedgerAutoRefresh(90000, 2000, { syncProofState: true });
             }
         } catch (err) {
             toast('Network error starting regeneration', 'error');
@@ -840,6 +1568,9 @@ async function startRegeneration(sid) {
 // Unified Session Management
 // ---------------------------------------------------------------------------
 async function loadSessions(modelFilter = null) {
+    if (typeof modelFilter !== 'string') {
+  modelFilter = getActiveModelFilter();
+    }
     const path = window.location.pathname;
     const isVerifier = path.includes('verifier');
     const isProvider = path.includes('provider');
@@ -853,15 +1584,23 @@ async function loadSessions(modelFilter = null) {
     if (!body) return;
 
     try {
-        const resp = await fetch(endpoint);
+        const cacheBust = endpoint.includes('?') ? '&' : '?';
+        const requestUrl = `${endpoint}${cacheBust}_ts=${Date.now()}`;
+        const resp = await fetch(requestUrl, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' }
+        });
+        if (!resp.ok) throw new Error(`Failed to load sessions (${resp.status})`);
         const data = await resp.json();
         
         if (!data.sessions || data.sessions.length === 0) {
-            const colspan = (isVerifier || isProvider) ? 8 : 7;
+          const colspan = isVerifier ? 9 : (isProvider ? 8 : 7);
             body.innerHTML = `<tr><td colspan="${colspan}" style="padding:3rem; text-align:center; opacity:0.5;">No execution records found.</td></tr>`;
             return;
         }
 
+        window.__SESSIONS__ = data.sessions;
+        
         body.innerHTML = data.sessions.map(s => {
             const getStatusBadge = (st, dur) => {
                 if (!st || st === 'pending') return `<span class="badge badge-neutral">PENDING</span>`;
@@ -883,18 +1622,29 @@ async function loadSessions(modelFilter = null) {
                 return `<div style="display:flex; align-items:center;"><span class="badge ${cls}">${icon}${label}</span>${timeStr}</div>`;
             };
 
+            const infoBtn = `<button class="btn btn-sm btn-ghost" onclick="showSessionDetailsModal('${s.id}')" style="color:var(--text-muted); font-size:0.95rem; line-height:1; padding:0.1rem 0.4rem;" title="View Prompt & Audit">ℹ️</button>`;
+            const c2paActionBtn = s.c2pa_status === 'signed'
+                ? `<a href="/api/c2pa/receipt/${s.id}" class="btn btn-sm" style="background:rgba(16,185,129,0.1); color:var(--emerald); border-color:rgba(16,185,129,0.2); text-decoration:none;" title="Download signed JPEG receipt">🔏 Receipt</a>`
+                : '';
+
             const actions = isVerifier ? `
-                <div style="display:flex; justify-content:flex-end; gap:0.5rem;">
+              <div class="session-actions">
+                    ${infoBtn}
                     <button class="btn btn-sm" onclick="startVerification('${s.id}')" style="background:rgba(16,185,129,0.1); color:var(--emerald); border-color:rgba(16,185,129,0.2);">Verify</button>
+                    ${s.verify_status === 'running' ? `<button class="btn btn-sm" onclick="stopProcess('${s.id}', 'verify')" style="background:rgba(244,63,94,0.1); color:var(--rose); border-color:rgba(244,63,94,0.25);">Stop</button>` : ''}
                     <button class="btn btn-sm btn-ghost" onclick="deleteSession('${s.id}')" style="color:var(--rose);">Purge</button>
                 </div>
             ` : (isProvider ? `
-                <div style="display:flex; justify-content:flex-end; gap:0.5rem;">
+              <div class="session-actions">
+                    ${infoBtn}
+                    ${c2paActionBtn}
                     <button class="btn btn-sm" onclick="startRegeneration('${s.id}')" style="background:rgba(99,102,241,0.1); color:var(--indigo); border-color:rgba(99,102,241,0.2);">Regen</button>
                     <button class="btn btn-sm btn-ghost" onclick="deleteSession('${s.id}')" style="color:var(--rose);">Purge</button>
                 </div>
             ` : `
-                <div style="display:flex; justify-content:flex-end; gap:0.5rem;">
+              <div class="session-actions">
+                    ${infoBtn}
+                    ${c2paActionBtn}
                     ${s.proof_status === 'running' ? `<button class="btn btn-sm" onclick="stopProcess('${s.id}', 'proof')" style="background:rgba(244,63,94,0.1); color:var(--rose);">Stop</button>` : ''}
                     ${s.verify_status === 'running' ? `<button class="btn btn-sm" onclick="stopProcess('${s.id}', 'verify')" style="background:rgba(244,63,94,0.1); color:var(--rose);">Abort</button>` : ''}
                     <button class="btn btn-sm" onclick="startRegeneration('${s.id}')" style="background:rgba(99,102,241,0.1); color:var(--indigo); border-color:rgba(99,102,241,0.2);">Regen</button>
@@ -902,13 +1652,15 @@ async function loadSessions(modelFilter = null) {
                 </div>
             `);
 
-            const timestamp = s.timestamp ? s.timestamp.split(' ')[1] || s.timestamp : '--:--';
-            const dateStr = s.timestamp ? s.timestamp.split(' ')[0] : '';
+            const tsFmt = formatTimestampIST(s.timestamp, { showSeconds: true });
+            const timestamp = tsFmt.time;
+            const dateStr = tsFmt.date;
 
             if (isVerifier || isProvider) {
                 const c2paBadge = s.c2pa_status === 'signed'
                     ? `<a href="/api/c2pa/receipt/${s.id}" class="badge badge-success" style="text-decoration:none; cursor:pointer; font-size:0.68rem;" title="Download C2PA Receipt">🔏 Receipt</a>`
                     : `<span class="badge badge-neutral" style="opacity:0.4; font-size:0.68rem;">—</span>`;
+              const c2paCell = isVerifier ? `<td style="padding:1rem; text-align:center;">${c2paBadge}</td>` : '';
                 return `
                     <tr class="fade-in">
                         <td style="padding:1rem; font-family:var(--font-mono); font-size:0.75rem; font-weight:700; opacity:0.7;">#${s.id}</td>
@@ -921,35 +1673,23 @@ async function loadSessions(modelFilter = null) {
                         <td style="padding:1rem; max-width:200px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.85rem; font-weight:600;" title="${escapeHTML(s.prompt)}">${escapeHTML(s.prompt)}</td>
                         <td style="padding:1rem;">${getStatusBadge(s.proof_status, s.proof_duration)}</td>
                         <td style="padding:1rem;">${getStatusBadge(s.verify_status, s.verify_duration)}</td>
-                        <td style="padding:1rem; text-align:center;">${c2paBadge}</td>
-                        <td style="padding:1rem;">${actions}</td>
+                        ${c2paCell}
+                        <td style="padding:1rem; text-align:right; white-space:normal;">${actions}</td>
                     </tr>
                 `;
             } else {
-                const c2paBadge = s.c2pa_status === 'signed'
-                    ? `<a href="/api/c2pa/receipt/${s.id}" class="badge badge-success" style="text-decoration:none; cursor:pointer; font-size:0.68rem;" title="Download Signed JPEG Receipt">🔏 Signed JPEG</a>`
-                    : `<span class="badge badge-neutral" style="opacity:0.4; font-size:0.68rem;">—</span>`;
-                
-                let manifestInfo = '<span style="opacity:0.5; font-size:0.75rem;">None</span>';
-                if (s.c2pa_manifest) {
-                    try {
-                        const m = JSON.parse(s.c2pa_manifest);
-                        manifestInfo = `<div style="font-size:0.7rem; color:var(--emerald); font-weight:600; line-height:1.1;">Verified AI<br><span style="opacity:0.7; font-weight:400; font-size:0.65rem;">${m.claim_generator || 'C2PA-sys'}</span></div>`;
-                    } catch(e) {
-                        manifestInfo = '<span style="opacity:0.5; font-size:0.75rem;">Valid</span>';
-                    }
-                }
-
                 return `
                     <tr class="fade-in">
                         <td style="padding:1rem; font-family:var(--font-mono); font-size:0.75rem; font-weight:700; opacity:0.7;">#${s.id}</td>
-                        <td style="padding:1rem; font-size:0.85rem; font-weight:700;">${timestamp}</td>
+                  <td style="padding:1rem; font-size:0.8rem; line-height:1.2;">
+                    <div style="font-weight:700;">${timestamp}</div>
+                    <div style="opacity:0.6; font-size:0.7rem;">${dateStr}</div>
+                  </td>
                         <td style="padding:1rem; max-width:250px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.9rem; font-weight:600;" title="${escapeHTML(s.prompt)}">${escapeHTML(s.prompt)}</td>
                         <td style="padding:1rem; font-size:0.85rem; font-weight:700;">${s.model_id || 'llama-2'}</td>
                         <td style="padding:1rem;">${getStatusBadge(s.proof_status, s.proof_duration)}</td>
-                        <td style="padding:1rem;">${manifestInfo}</td>
-                        <td style="padding:1rem; text-align:center;">${c2paBadge}</td>
-                        <td style="padding:1rem;">${actions}</td>
+                        <td style="padding:1rem;">${getStatusBadge(s.verify_status, s.verify_duration)}</td>
+                        <td style="padding:1rem; text-align:right; white-space:normal;">${actions}</td>
                     </tr>
                 `;
             }
@@ -961,13 +1701,28 @@ async function loadSessions(modelFilter = null) {
 
 
 async function stopProcess(id, type) {
-    if (!confirm(`Are you sure you want to stop this ${type} process?`)) return;
+  let sessionId = id;
+  let processType = type;
+  if (!processType && (id === 'proof' || id === 'verify')) {
+    processType = id;
+    sessionId = null;
+  }
+  if (!processType) return;
+  if (!confirm(`Are you sure you want to stop this ${processType} process?`)) return;
     try {
-        const resp = await fetch(`/api/${type}/stop/${id}`, { method: 'POST' });
+    const endpoint = sessionId ? `/api/${processType}/stop/${sessionId}` : `/api/${processType}/stop`;
+    const resp = await fetch(endpoint, { method: 'POST' });
         const data = await resp.json();
         if (data.status === 'success' || data.success) {
             toast('Process termination signal sent', 'success');
-            setTimeout(loadSessions, 1000);
+      const opts = processType === 'verify'
+        ? { syncVerifierState: true }
+        : { syncProofState: true };
+      if (processType === 'verify') {
+        setVerifierControls(false);
+        stopVerifyFastWatcher();
+      }
+      startLedgerAutoRefresh(30000, 2000, opts);
         } else {
             toast(data.error || 'Failed to stop process', 'error');
         }
@@ -983,7 +1738,7 @@ async function deleteSession(id) {
         const data = await resp.json();
         if (data.status === 'success' || data.success) {
             toast('Session purged from ledger', 'success');
-            setTimeout(loadSessions, 500);
+      refreshLedgerNow();
         } else {
             toast(data.error || 'Purge failed', 'error');
         }
@@ -998,6 +1753,13 @@ async function deleteSession(id) {
 function appendTerminal(tid, line, type = 'info') {
   const t = typeof tid === 'string' ? document.getElementById(tid) : tid;
   if (!t) return;
+  if (t.tagName === 'TEXTAREA') {
+      const textLine = line.includes('>') ? line : `> ${line}`;
+      if (t.value && !t.value.endsWith('\n')) t.value += '\n';
+      t.value += textLine;
+      t.scrollTop = t.scrollHeight;
+      return;
+  }
   const d = document.createElement('div');
   d.className = `ter-line ter-${type}`;
   
@@ -1031,7 +1793,25 @@ function appendTerminal(tid, line, type = 'info') {
 
 function clearTerminal(tid) {
   const t = document.getElementById(tid);
-  if (t) t.innerHTML = '';
+  if (!t) return;
+  if (t.tagName === 'TEXTAREA') t.value = '';
+  else t.innerHTML = '';
+}
+
+function downloadTerminalLog(tid, filenamePrefix = 'log') {
+  const t = document.getElementById(tid);
+  if (!t) return;
+  const text = t.tagName === 'TEXTAREA' ? t.value : t.innerText;
+  const blob = new Blob([text || ''], { type: 'text/plain' });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `${filenamePrefix}-${ts}.txt`;
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(link.href);
 }
 
 function addVerificationResult(data) {

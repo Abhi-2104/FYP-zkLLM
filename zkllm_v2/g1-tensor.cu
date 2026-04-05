@@ -543,7 +543,7 @@ KERNEL void G1Jacobian_rowwise_sum_reduction(const G1Jacobian_t* arr_in, G1Jacob
     auto col_tid = threadIdx.x;
 
     // Load input into shared memory
-    rwsum_data[row_tid][col_tid] = (row_id < nrow && col_id < ncol) ? arr_in[row_id * ncol + col_id] : blstrs__g1__G1Affine_ZERO;
+    rwsum_data[row_tid][col_tid] = (row_id < nrow && col_id < ncol) ? arr_in[(unsigned long long)row_id * ncol + col_id] : blstrs__g1__G1Affine_ZERO;
     __syncthreads();
 
     for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) {
@@ -555,7 +555,7 @@ KERNEL void G1Jacobian_rowwise_sum_reduction(const G1Jacobian_t* arr_in, G1Jacob
     
     // Write the result for this block to output
     if (col_tid == 0 && row_id < nrow){
-        arr_out[row_id * ncol_out + blockIdx.x] = rwsum_data[row_tid][0];
+        arr_out[(unsigned long long)row_id * ncol_out + blockIdx.x] = rwsum_data[row_tid][0];
     }
 }
 
@@ -595,9 +595,9 @@ G1TensorJacobian G1TensorJacobian::rowwise_sum(uint nrow, uint ncol) const
     G1Jacobian_t *ptr_input, *ptr_output;
     uint curNumCol = ncol;
     uint nextNumCol = (curNumCol + G1RowwiseSumTileWidth - 1) / G1RowwiseSumTileWidth;
-    cudaMalloc((void**)&ptr_input, nrow * curNumCol * sizeof(G1Jacobian_t));
-    cudaMalloc((void**)&ptr_output, nrow * nextNumCol * sizeof(G1Jacobian_t));
-    cudaMemcpy(ptr_input, gpu_data, nrow * ncol * sizeof(G1Jacobian_t), cudaMemcpyDeviceToDevice);
+    cudaMalloc((void**)&ptr_input, (unsigned long long)nrow * curNumCol * sizeof(G1Jacobian_t));
+    cudaMalloc((void**)&ptr_output, (unsigned long long)nrow * nextNumCol * sizeof(G1Jacobian_t));
+    cudaMemcpy(ptr_input, gpu_data, (unsigned long long)nrow * ncol * sizeof(G1Jacobian_t), cudaMemcpyDeviceToDevice);
     uint gridDimY = (nrow + G1RowwiseSumTileWidth - 1) / G1RowwiseSumTileWidth;
 
     while (curNumCol > 1)

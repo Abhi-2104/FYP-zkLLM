@@ -96,6 +96,8 @@ Requirements:
                         help='Number of layers to capture (default: ALL layers in model)')
     parser.add_argument('--output_dir', type=str, default='activations',
                         help='Output directory for saved activations (default: activations/)')
+    parser.add_argument('--max_seq_len', type=int, default=None,
+                        help='Optional max token length for capture (input is truncated if longer)')
     parser.add_argument('--cpu', action='store_true',
                         help='Force CPU loading (slower but uses swap file)')
     parser.add_argument('--show_mapping', action='store_true',
@@ -146,6 +148,8 @@ Requirements:
         print(f"Layers to capture: {num_layers} ({'ALL' if num_layers == total_layers else 'PARTIAL'})")
         print(f"Activations per layer: 4 (input, attn-output, post-norm, ffn-output)")
         print(f"Total activations to capture: {num_layers * 4}")
+        if args.max_seq_len:
+            print(f"Max sequence length: {args.max_seq_len} tokens")
         print(f"Output directory: {args.output_dir}/")
         print(f"Loading mode: {'CPU-only' if args.cpu else '4-bit GPU (if available)'}")
         print(f"{'='*70}\n")
@@ -162,7 +166,8 @@ Requirements:
         result = manager.capture_from_text(
             text=args.text,
             output_dir=args.output_dir,
-            num_layers=num_layers
+            num_layers=num_layers,
+            max_seq_len=args.max_seq_len
         )
         
         print(f"\n{'='*70}")
