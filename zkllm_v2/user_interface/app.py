@@ -115,6 +115,16 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Persist proof-generation telemetry for session detail popup.
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN proof_log TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN proof_audit TEXT")
+        except sqlite3.OperationalError:
+            pass
+
 init_db()
 
 # Initialize C2PA certificate at startup
@@ -492,6 +502,20 @@ def api_prompt():
     if not prompt:
         return jsonify({"error": "empty prompt"}), 400
 
+    raw_max_new_tokens = data.get('max_new_tokens', 1)
+    try:
+        max_new_tokens = int(raw_max_new_tokens)
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_new_tokens must be an integer"}), 400
+    if max_new_tokens < 1:
+        return jsonify({"error": "max_new_tokens must be >= 1"}), 400
+
+    # Server-side policy: keep token-k hidden from end users.
+    # - Single token request: capture prefill pass.
+    # - Multi-token request: hybrid mode — capture prefill (all prompt tokens)
+    #   AND one random decode step for strongest cryptographic guarantee.
+    capture_mode = 'hybrid' if max_new_tokens > 1 else 'prefill'
+
     selected_model_id = state.get("selected_model", "llama-2-7b")
     model_info = MODELS.get(selected_model_id) or MODELS.get("llama-2-7b") or {"layers":32, "size":7, "seq_len":128}
     model_size = 13 if "13b" in selected_model_id.lower() else 7
@@ -515,7 +539,9 @@ def api_prompt():
         "--text", prompt,
         "--model_size", str(model_size),
         "--output_dir", str(ACT_DIR / str(session_id)),
-        "--max_seq_len", str(seq)
+        "--max_seq_len", str(seq),
+        "--max_new_tokens", str(max_new_tokens),
+        "--capture_mode", str(capture_mode),
     ]
     if model_size > 7:
         cmd.append("--cpu")  # Still force CPU for 13B on 6GB card to prevent hard OOM
@@ -561,6 +587,8 @@ def run_inference_task(sid, cmd, username):
         )
         
         pred_token = "unknown"
+        generated_text = ""
+        generated_token_count = 1
         for line in proc.stdout:
             line = line.strip()
             if not line: continue
@@ -575,8 +603,22 @@ def run_inference_task(sid, cmd, username):
                 socketio.emit("inference_progress", {"sid": sid, "pct": 50, "status": "Configuring ZK layers..."})
             elif "Executing forward pass" in line:
                 socketio.emit("inference_progress", {"sid": sid, "pct": 70, "status": "Synthesing proofs..."})
+            elif "Generating continuation" in line:
+                socketio.emit("inference_progress", {"sid": sid, "pct": 85, "status": "Generating continuation..."})
             elif "Predicted next token:" in line:
-                pred_token = line.split(":", 1)[1].strip().strip("'")
+                m = re.match(r"^Predicted next token:\s*'(.*)'$", line)
+                pred_token = m.group(1) if m else line.split(":", 1)[1].strip().strip("'")
+            elif "Generated token count:" in line:
+                try:
+                    generated_token_count = int(line.split(":", 1)[1].strip())
+                except Exception:
+                    pass
+            elif "Generated text JSON:" in line:
+                payload = line.split(":", 1)[1].strip()
+                try:
+                    generated_text = json.loads(payload)
+                except Exception:
+                    generated_text = payload.strip().strip("'")
                 socketio.emit("inference_progress", {"sid": sid, "pct": 95, "status": "Finalizing..."})
 
             socketio.sleep(0) # Yield for event loop
@@ -585,7 +627,11 @@ def run_inference_task(sid, cmd, username):
         state["inference_job"]["running"] = False
         
         if proc.returncode == 0:
-            resp_text = f"[Inference complete.]\n\nPredicted next token: {pred_token}"
+            final_text = generated_text if generated_text else pred_token
+            if generated_token_count > 1:
+                resp_text = f"[Inference complete.]\n\nGenerated continuation ({generated_token_count} tokens): {final_text}"
+            else:
+                resp_text = f"[Inference complete.]\n\nPredicted next token: {final_text}"
             with get_db_conn() as conn:
                 conn.execute(
                         "UPDATE sessions SET inference_status = 'completed', response = ? WHERE id = ?",
@@ -617,7 +663,9 @@ def run_inference_task(sid, cmd, username):
             socketio.emit("inference_complete", {
                 "sid": sid, 
                 "success": True, 
-                "prediction": pred_token,
+                "prediction": final_text,
+                "generated_text": final_text,
+                "generated_token_count": generated_token_count,
                 "response": resp_text
             })
         else:
@@ -647,7 +695,8 @@ def api_session_detail(id):
         wanted = [
             'id', 'user_id', 'prompt', 'response', 'model_id', 'request_verify',
             'inference_status', 'proof_status', 'verify_status', 'timestamp',
-            'proof_duration', 'verify_duration', 'verify_runs', 'verify_log', 'verify_audit',
+            'proof_duration', 'verify_duration', 'verify_runs',
+            'proof_log', 'proof_audit', 'verify_log', 'verify_audit',
             'c2pa_status', 'c2pa_manifest'
         ]
         selected = [c for c in wanted if c in available]
@@ -671,7 +720,7 @@ def api_session_detail(id):
                 payload['username'] = urow['username'] if isinstance(urow, sqlite3.Row) else urow[0]
 
         # Decode serialized JSON payloads where available.
-        for key in ('verify_log', 'verify_audit', 'c2pa_manifest'):
+        for key in ('proof_log', 'proof_audit', 'verify_log', 'verify_audit', 'c2pa_manifest'):
             if key in payload and isinstance(payload[key], str) and payload[key].strip():
                 try:
                     payload[key] = json.loads(payload[key])
@@ -685,6 +734,13 @@ def api_session_detail(id):
                 payload["verify_log"] = active_vjob.get("log", [])[-300:]
             if not payload.get("verify_audit"):
                 payload["verify_audit"] = active_vjob.get("results", [])[-300:]
+
+        active_pjob = state.get("proof_job") or {}
+        if active_pjob.get("session_id") == id:
+            if not payload.get("proof_log"):
+                payload["proof_log"] = active_pjob.get("log", [])[-300:]
+            if not payload.get("proof_audit"):
+                payload["proof_audit"] = active_pjob.get("results", [])[-300:]
         return jsonify(payload)
 
 @app.route('/api/sessions', methods=['GET'])
@@ -875,7 +931,7 @@ def api_proof_start():
         "running": True, "progress": 0, "current_layer": start,
         "current_component": "", "total_layers": max(1, end - start + 1),
         "start_layer": start, "end_layer": end,
-        "log": [], "started_at": time.time(), "success": None,
+        "log": [], "results": [], "started_at": time.time(), "success": None,
         "session_id": sid
     }
     state["verify_results"] = []
@@ -883,115 +939,216 @@ def api_proof_start():
     if sid:
         state["current_session_id"] = sid
         with get_db_conn() as conn:
-            conn.execute("UPDATE sessions SET proof_status = 'running' WHERE id = ?", (sid,))
+            conn.execute(
+                "UPDATE sessions SET proof_status = 'running', proof_log = NULL, proof_audit = NULL WHERE id = ?",
+                (sid,)
+            )
 
     def run():
-        cmd = [
-            PYTHON_EXE, "-u", str(BASE_DIR / "generate_proofs_v2.py"),
-            "--model_size", str(model_size),
-            "--seq_len", str(seq),
-            "--start_layer", str(start),
-            "--end_layer", str(end),
-            "--model_card", str(model_info.get("card", f"meta-llama/Llama-2-{model_size}b-hf")),
-            "--act_dir", str(ACT_DIR / str(sid))
-        ]
-        if sid:
-            cmd += ["--run_id", str(sid)]
-        
-        # Add workdir if it exists in model_info
-        if "workdir" in model_info:
-            cmd += ["--workdir", str(model_info["workdir"])]
+        embed_dim = 4096  # LLaMA-2 embed_dim
 
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, cwd=str(BASE_DIR), bufsize=1, env=get_optimized_env()
-        )
-        state["proof_job"]["process"] = proc
-        component_map = {
-            "Input RMSNorm": 0, "Self-Attention": 1,
-            "Post-Attn RMSNorm": 2, "Feed-Forward": 3,
-            "Skip Connection": 4,
-        }
-        for line in proc.stdout:
-            line = line.rstrip()
-            state["proof_job"]["log"].append(line)
-            socketio.emit("proof_log", {"line": line})
+        # ------- Phase detection: check if prefill activations exist ----------
+        prefill_act_dir = ACT_DIR / str(sid) / "prefill"
+        has_prefill = prefill_act_dir.is_dir() and (prefill_act_dir / "layer-0-block-input.bin").exists()
 
-            # Parse layer progress
-            lm = re.search(r"\[(\d+)/5\]\s+(.+)", line)
-            if lm:
-                step = int(lm.group(1))
-                comp = lm.group(2).strip()
-                state["proof_job"]["current_component"] = comp
-                # Compute progress: component step within a layer
-                layer_progress = step / 5
-                total = max(state["proof_job"]["total_layers"], 1)
-                overall = (state["proof_job"]["current_layer"] - start + layer_progress) / total
-                state["proof_job"]["progress"] = min(int(overall * 100), 99)
-                socketio.emit("proof_progress", {
-                    "layer": state["proof_job"]["current_layer"],
-                    "total": state["proof_job"]["total_layers"],
-                    "start_layer": state["proof_job"].get("start_layer", start),
-                    "end_layer": state["proof_job"].get("end_layer", end),
-                    "component": comp,
-                    "percent": state["proof_job"]["progress"],
-                    "session_id": state["proof_job"].get("session_id"),
-                })
+        # Auto-detect prefill seq_len from file size
+        prefill_seq = None
+        if has_prefill:
+            try:
+                fsize = (prefill_act_dir / "layer-0-block-input.bin").stat().st_size
+                prefill_seq = fsize // (4 * embed_dim)  # int32 = 4 bytes
+            except Exception:
+                has_prefill = False
 
-            # Detect layer start (from "PROCESSING LAYER N")
-            pm = re.search(r"PROCESSING LAYER (\d+)", line)
-            if pm:
-                state["proof_job"]["current_layer"] = int(pm.group(1))
+        # --- MODE SELECTION (Uncomment the desired strategy) ---
 
-            # Detect layer completion (from "✅ Layer N completed in Xs")
-            sm = re.search(r"✅ Layer (\d+) completed", line)
-            if sm:
-                state["proof_job"]["current_layer"] = int(sm.group(1)) + 1
+        # # [A] HYBRID MODE (Default: Decode Step + Prefill)
+        # phases = [("decode", str(ACT_DIR / str(sid)), str(seq), str(sid) if sid else None)]
+        # if has_prefill and prefill_seq and prefill_seq > 0:
+        #      phases.append(("prefill", str(prefill_act_dir), str(prefill_seq), f"{sid}/prefill" if sid else "prefill"))
 
-            # Detect SUCCESS / FAILURE per component
-            if "- SUCCESS" in line:
-                socketio.emit("proof_component_done", {
-                    "layer": state["proof_job"]["current_layer"],
-                    "component": state["proof_job"]["current_component"],
-                    "success": True,
-                    "session_id": state["proof_job"].get("session_id"),
-                })
-            elif "- FAILED" in line:
-                socketio.emit("proof_component_done", {
-                    "layer": state["proof_job"]["current_layer"],
-                    "component": state["proof_job"]["current_component"],
-                    "success": False,
-                    "session_id": state["proof_job"].get("session_id"),
-                })
-            
-            # Yield to event loop to allow SocketIO to flush the emit buffer
-            socketio.sleep(0)
+        # [B] DECODE ONLY MODE (Single token proof only)
+        phases = [("decode", str(ACT_DIR / str(sid)), str(seq), str(sid) if sid else None)]
 
-        proc.wait()
+        # [C] PREFILL ONLY MODE (Whole prompt proof only)
+        # if has_prefill and prefill_seq and prefill_seq > 0:
+        #     phases = [("prefill", str(prefill_act_dir), str(prefill_seq), f"{sid}/prefill" if sid else "prefill")]
+
+
+        total_phases = len(phases)
+        total_layers_per_phase = max(1, end - start + 1)
+        grand_total = total_phases * total_layers_per_phase
+
+        all_success = True
+        grand_started = time.time()
+
+        for phase_idx, (phase_name, act_dir, phase_seq, run_id) in enumerate(phases):
+            phase_label = f"[Phase {phase_idx+1}/{total_phases}: {phase_name.upper()}]"
+            phase_msg = f"\n{'='*70}\n  {phase_label} Proof generation (seq_len={phase_seq})\n{'='*70}"
+            state["proof_job"]["log"].append(phase_msg)
+            socketio.emit("proof_log", {"line": phase_msg})
+            socketio.emit("proof_phase", {
+                "phase": phase_idx + 1, "total_phases": total_phases,
+                "phase_name": phase_name, "seq_len": int(phase_seq),
+                "session_id": state["proof_job"].get("session_id"),
+            })
+
+            cmd = [
+                PYTHON_EXE, "-u", str(BASE_DIR / "generate_proofs_v2.py"),
+                "--model_size", str(model_size),
+                "--seq_len", str(phase_seq),
+                "--start_layer", str(start),
+                "--end_layer", str(end),
+                "--model_card", str(model_info.get("card", f"meta-llama/Llama-2-{model_size}b-hf")),
+                "--act_dir", act_dir
+            ]
+            if run_id:
+                cmd += ["--run_id", str(run_id)]
+
+            # Add workdir if it exists in model_info
+            if "workdir" in model_info:
+                cmd += ["--workdir", str(model_info["workdir"])]
+
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, cwd=str(BASE_DIR), bufsize=1, env=get_optimized_env()
+            )
+            state["proof_job"]["process"] = proc
+            component_map = {
+                "Input RMSNorm": 0, "Self-Attention": 1,
+                "Post-Attn RMSNorm": 2, "Feed-Forward": 3,
+                "Skip Connection": 4,
+            }
+            for line in proc.stdout:
+                line = line.rstrip()
+                tagged_line = f"{phase_label} {line}" if total_phases > 1 else line
+                state["proof_job"]["log"].append(tagged_line)
+                socketio.emit("proof_log", {"line": tagged_line})
+
+                # Parse layer progress
+                lm = re.search(r"\[(\d+)/5\]\s+(.+)", line)
+                if lm:
+                    step = int(lm.group(1))
+                    comp = lm.group(2).strip()
+                    state["proof_job"]["current_component"] = comp
+                    state["proof_job"]["results"].append({
+                        "ts": round(time.time(), 3),
+                        "layer": state["proof_job"].get("current_layer", start),
+                        "component": comp,
+                        "status": "info",
+                        "line": tagged_line,
+                        "phase": phase_name,
+                    })
+                    # Compute progress across all phases
+                    layer_progress = step / 5
+                    layers_done_this_phase = state["proof_job"]["current_layer"] - start + layer_progress
+                    grand_done = phase_idx * total_layers_per_phase + layers_done_this_phase
+                    state["proof_job"]["progress"] = min(int(grand_done / grand_total * 100), 99)
+                    socketio.emit("proof_progress", {
+                        "layer": state["proof_job"]["current_layer"],
+                        "total": state["proof_job"]["total_layers"],
+                        "start_layer": state["proof_job"].get("start_layer", start),
+                        "end_layer": state["proof_job"].get("end_layer", end),
+                        "component": comp,
+                        "percent": state["proof_job"]["progress"],
+                        "session_id": state["proof_job"].get("session_id"),
+                        "phase": phase_name,
+                        "phase_idx": phase_idx + 1,
+                        "total_phases": total_phases,
+                    })
+
+                # Detect layer start
+                pm = re.search(r"PROCESSING LAYER (\d+)", line)
+                if pm:
+                    state["proof_job"]["current_layer"] = int(pm.group(1))
+
+                # Detect layer completion
+                sm = re.search(r"✅ Layer (\d+) completed", line)
+                if sm:
+                    state["proof_job"]["current_layer"] = int(sm.group(1)) + 1
+
+                # Detect SUCCESS / FAILURE per component
+                if "- SUCCESS" in line:
+                    state["proof_job"]["results"].append({
+                        "ts": round(time.time(), 3),
+                        "layer": state["proof_job"].get("current_layer", start),
+                        "component": state["proof_job"].get("current_component", ""),
+                        "status": "pass",
+                        "line": tagged_line,
+                        "phase": phase_name,
+                    })
+                    socketio.emit("proof_component_done", {
+                        "layer": state["proof_job"]["current_layer"],
+                        "component": state["proof_job"]["current_component"],
+                        "success": True,
+                        "session_id": state["proof_job"].get("session_id"),
+                        "phase": phase_name,
+                    })
+                elif "- FAILED" in line:
+                    state["proof_job"]["results"].append({
+                        "ts": round(time.time(), 3),
+                        "layer": state["proof_job"].get("current_layer", start),
+                        "component": state["proof_job"].get("current_component", ""),
+                        "status": "fail",
+                        "line": tagged_line,
+                        "phase": phase_name,
+                    })
+                    socketio.emit("proof_component_done", {
+                        "layer": state["proof_job"]["current_layer"],
+                        "component": state["proof_job"]["current_component"],
+                        "success": False,
+                        "session_id": state["proof_job"].get("session_id"),
+                        "phase": phase_name,
+                    })
+
+                if len(state["proof_job"]["results"]) > 1200:
+                    state["proof_job"]["results"] = state["proof_job"]["results"][-1200:]
+
+                # Yield to event loop
+                socketio.sleep(0)
+
+            proc.wait()
+            if proc.returncode != 0:
+                all_success = False
+                # Log phase failure but continue to next phase
+                fail_msg = f"{phase_label} ❌ FAILED (exit code {proc.returncode})"
+                state["proof_job"]["log"].append(fail_msg)
+                socketio.emit("proof_log", {"line": fail_msg})
+
+            # Reset current_layer for next phase
+            state["proof_job"]["current_layer"] = start
+
+        # ---- All phases complete ----
         state["proof_job"]["running"]  = False
-        duration = time.time() - state["proof_job"]["started_at"]
-        success = proc.returncode == 0
-        state["proof_job"]["success"] = success
-        state["proof_job"]["progress"] = 100 if success else -1
-        
+        duration = time.time() - grand_started
+        state["proof_job"]["success"] = all_success
+        state["proof_job"]["progress"] = 100 if all_success else -1
+
         if sid:
             with get_db_conn() as conn:
-                status = "completed" if success else "failed"
+                status = "completed" if all_success else "failed"
                 conn.execute(
-                    "UPDATE sessions SET proof_status = ?, proof_duration = ? WHERE id = ?",
-                    (status, round(duration, 1), sid)
+                    "UPDATE sessions SET proof_status = ?, proof_duration = ?, proof_log = ?, proof_audit = ? WHERE id = ?",
+                    (
+                        status,
+                        round(duration, 1),
+                        json.dumps(state["proof_job"].get("log", [])[-1500:]),
+                        json.dumps(state["proof_job"].get("results", [])[-1500:]),
+                        sid,
+                    )
                 )
 
         socketio.emit("proof_complete", {
-            "success": success,
+            "success": all_success,
             "elapsed": round(duration, 1),
             "start_layer": state["proof_job"].get("start_layer", start),
             "end_layer": state["proof_job"].get("end_layer", end),
             "session_id": state["proof_job"].get("session_id"),
+            "phases_run": total_phases,
         })
 
     threading.Thread(target=run, daemon=True).start()
-    return jsonify({"success": True, "message": "Proof generation started", "session_id": sid})
+    return jsonify({"success": True, "message": "Proof generation started", "session_id": sid, "hybrid": bool((ACT_DIR / str(sid) / "prefill").is_dir())})
 
 @app.route('/api/proof/status')
 def api_proof_status():
@@ -1036,7 +1193,14 @@ def api_proof_stop(session_id=None):
         sid = session_id or state.get("current_session_id")
         if sid:
             with get_db_conn() as conn:
-                conn.execute("UPDATE sessions SET proof_status = 'aborted' WHERE id = ?", (sid,))
+                conn.execute(
+                    "UPDATE sessions SET proof_status = 'aborted', proof_log = ?, proof_audit = ? WHERE id = ?",
+                    (
+                        json.dumps(state["proof_job"].get("log", [])[-1500:]),
+                        json.dumps(state["proof_job"].get("results", [])[-1500:]),
+                        sid,
+                    )
+                )
                 
         return jsonify({"success": True, "message": "Proof generation aborted"})
     # Even if no running process, mark the session aborted if we got a session_id
@@ -1134,7 +1298,19 @@ def api_verify_start():
         "running": True, "log": [], "results": [],
         "started_at": time.time(),
         "success": None,
-        "session_id": sid
+        "session_id": sid,
+        "progress": {
+            "start_layer": start,
+            "end_layer": end,
+            "layer": start,
+            "module": "input_rmsnorm",
+            "module_label": "Input RMSNorm",
+            "module_idx": 0,
+            "percent": 0,
+        },
+        "pass_count": 0,
+        "fail_count": 0,
+        "last_update": round(time.time(), 3),
     }
     
     if sid:
@@ -1153,28 +1329,45 @@ def api_verify_start():
             env["PYTHONUNBUFFERED"] = "1"
             model_size = model_info.get("size", 7)
             seq_len    = model_info.get("seq_len", 128)
+            embed_dim = 4096  # LLaMA-2 embed_dim
 
-            cmd = [
-                PYTHON_EXE, "-u", str(BASE_DIR / "verify_proofs_v2.py"),
-                "--model_size",  str(model_size),
-                "--seq_len",     str(seq_len),
-                "--start_layer", str(start),
-                "--end_layer",   str(end),
-                "--act_dir",     str(ACT_DIR / str(sid))
-            ]
-            if sid:
-                cmd += ["--run_id", str(sid)]
+            # ------- Phase detection for hybrid verify ----------
+            prefill_act_dir = ACT_DIR / str(sid) / "prefill"
+            base_workdir = Path(model_info.get("workdir", str(get_workdir(selected_model_id))))
+            prefill_proof_dir = (base_workdir / f"{sid}_prefill") if sid else None
 
-            if "workdir" in model_info:
-                cmd += ["--workdir", str(model_info["workdir"])]
-
-            print(f"[verify cmd] {' '.join(cmd)}")
-
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, cwd=str(BASE_DIR), bufsize=1, env=get_optimized_env()
+            has_prefill = (
+                prefill_proof_dir is not None
+                and prefill_proof_dir.is_dir()
+                and prefill_act_dir.is_dir()
+                and (prefill_act_dir / "layer-0-block-input.bin").exists()
             )
-            state["verify_job"]["process"] = proc
+
+            # Auto-detect prefill seq_len from file size
+            prefill_seq = None
+            if has_prefill:
+                try:
+                    fsize = (prefill_act_dir / "layer-0-block-input.bin").stat().st_size
+                    prefill_seq = fsize // (4 * embed_dim)
+                except Exception:
+                    has_prefill = False
+
+            # --- MODE SELECTION (Uncomment the desired strategy) ---
+
+            # [A] HYBRID MODE (Default: Decode Step + Prefill)
+            phases = [("decode", str(ACT_DIR / str(sid)), str(seq_len), str(sid) if sid else None)]
+            if has_prefill and prefill_seq and prefill_seq > 0:
+                phases.append(("prefill", str(prefill_act_dir), str(prefill_seq), f"{sid}/prefill" if sid else "prefill"))
+
+            # [B] DECODE ONLY MODE (Single token verification only)
+            # phases = [("decode", str(ACT_DIR / str(sid)), str(seq_len), str(sid) if sid else None)]
+
+            # [C] PREFILL ONLY MODE (Whole prompt verification only)
+            # if has_prefill and prefill_seq and prefill_seq > 0:
+            #     phases = [("prefill", str(prefill_act_dir), str(prefill_seq), f"{sid}/prefill" if sid else "prefill")]
+
+
+            total_phases = len(phases)
 
             # Verification pipeline modules per layer (in order)
             MODULES = ["input_rmsnorm", "self_attn", "post_attn_rmsnorm", "ffn", "skip_connection"]
@@ -1188,10 +1381,11 @@ def api_verify_start():
             total_layers = max(end - start + 1, 1)
             _v_layer = [start]
             _v_mod = [0]
+            _phase_label = [""]
 
             def emit_verify_progress():
                 pct = int(((_v_layer[0] - start) * 5 + _v_mod[0]) / (total_layers * 5) * 100)
-                socketio.emit("verify_progress", {
+                progress_payload = {
                     "layer": _v_layer[0],
                     "total_layers": total_layers,
                     "start_layer": start,
@@ -1200,7 +1394,11 @@ def api_verify_start():
                     "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
                     "module_idx": _v_mod[0],
                     "percent": min(pct, 99),
-                })
+                    "phase": _phase_label[0],
+                }
+                state["verify_job"]["progress"] = progress_payload
+                state["verify_job"]["last_update"] = round(time.time(), 3)
+                socketio.emit("verify_progress", progress_payload)
 
             def infer_parameter(raw_line):
                 ll = raw_line.lower()
@@ -1238,72 +1436,128 @@ def api_verify_start():
                     return "warn"
                 return "info"
 
-            for line in proc.stdout:
-                line = line.rstrip()
-                state["verify_job"]["log"].append(line)
-                socketio.emit("verify_log", {"line": line})
+            all_success = True
 
-                # Detect layer start — only match the explicit "VERIFYING LAYER N" header line
-                lm = re.search(r"VERIFYING LAYER (\d+)", line)
-                if lm:
-                    _v_layer[0] = int(lm.group(1))
-                    _v_mod[0] = 0
-                    emit_verify_progress()
+            for phase_idx, (phase_name, act_dir, phase_seq, run_id) in enumerate(phases):
+                _phase_label[0] = phase_name
+                phase_label_str = f"[Phase {phase_idx+1}/{total_phases}: {phase_name.upper()}]"
 
-                # Detect per-module step using [N/5] prefix (most reliable)
-                step_m = re.search(r"\[(\d+)/5\]", line)
-                if step_m:
-                    step_num = int(step_m.group(1))
-                    _v_mod[0] = step_num - 1  # [1/5] -> idx 0, [2/5] -> idx 1, etc.
-                    emit_verify_progress()
+                phase_msg = f"\n{'='*70}\n  {phase_label_str} Verification (seq_len={phase_seq})\n{'='*70}"
+                state["verify_job"]["log"].append(phase_msg)
+                socketio.emit("verify_log", {"line": phase_msg})
+                socketio.emit("verify_phase", {
+                    "phase": phase_idx + 1, "total_phases": total_phases,
+                    "phase_name": phase_name, "seq_len": int(phase_seq),
+                    "session_id": state["verify_job"].get("session_id"),
+                })
 
-                # Capture structured verifier audit entries for modal inspection.
-                level = infer_level(line)
-                param = infer_parameter(line)
-                if level != "info" or param or line.startswith("Step "):
-                    state["verify_job"]["results"].append({
-                        "ts": round(time.time(), 3),
-                        "layer": _v_layer[0],
-                        "module": MODULES[min(_v_mod[0], 4)],
-                        "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
-                        "parameter": param,
-                        "status": level,
-                        "line": line,
-                    })
-                    if len(state["verify_job"]["results"]) > 1200:
-                        state["verify_job"]["results"] = state["verify_job"]["results"][-1200:]
+                # Reset layer tracking for this phase
+                _v_layer[0] = start
+                _v_mod[0] = 0
 
-                # Detect per-component result — matches "✅ Layer N ... - SUCCESS" lines
-                passed = "✅" in line and "SUCCESS" in line.upper()
-                failed = ("❌" in line or ("FAILED" in line.upper() and "exit code" not in line.lower())) and not passed
+                cmd = [
+                    PYTHON_EXE, "-u", str(BASE_DIR / "verify_proofs_v2.py"),
+                    "--model_size",  str(model_size),
+                    "--seq_len",     str(phase_seq),
+                    "--start_layer", str(start),
+                    "--end_layer",   str(end),
+                    "--act_dir",     act_dir
+                ]
+                if run_id:
+                    cmd += ["--run_id", str(run_id)]
 
-                if passed or failed:
-                    event_payload = {
-                        "line": line,
-                        "passed": passed,
-                        "layer": _v_layer[0],
-                        "module": MODULES[min(_v_mod[0], 4)],
-                        "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
-                    }
-                    socketio.emit("verify_component", event_payload)
-                    state["verify_job"]["results"].append({
-                        "ts": round(time.time(), 3),
-                        "layer": _v_layer[0],
-                        "module": MODULES[min(_v_mod[0], 4)],
-                        "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
-                        "parameter": infer_parameter(line),
-                        "status": "pass" if passed else "fail",
-                        "line": line,
-                    })
-                    if passed:
-                        _v_mod[0] = min(_v_mod[0] + 1, 4)
+                if "workdir" in model_info:
+                    cmd += ["--workdir", str(model_info["workdir"])]
+
+                print(f"[verify cmd] {' '.join(cmd)}")
+
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, cwd=str(BASE_DIR), bufsize=1, env=get_optimized_env()
+                )
+                state["verify_job"]["process"] = proc
+
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    tagged_line = f"{phase_label_str} {line}" if total_phases > 1 else line
+                    state["verify_job"]["log"].append(tagged_line)
+                    socketio.emit("verify_log", {"line": tagged_line})
+
+                    # Detect layer start
+                    lm = re.search(r"VERIFYING LAYER (\d+)", line)
+                    if lm:
+                        _v_layer[0] = int(lm.group(1))
+                        _v_mod[0] = 0
                         emit_verify_progress()
 
-                # Yield to the event loop so Socket.IO can flush telemetry buffers
-                socketio.sleep(0)
+                    # Detect per-module step
+                    step_m = re.search(r"\[(\d+)/5\]", line)
+                    if step_m:
+                        step_num = int(step_m.group(1))
+                        _v_mod[0] = step_num - 1
+                        emit_verify_progress()
 
-            proc.wait()
-            success = proc.returncode == 0
+                    # Capture structured verifier audit entries
+                    level = infer_level(line)
+                    param = infer_parameter(line)
+                    if level != "info" or param or line.startswith("Step "):
+                        state["verify_job"]["results"].append({
+                            "ts": round(time.time(), 3),
+                            "layer": _v_layer[0],
+                            "module": MODULES[min(_v_mod[0], 4)],
+                            "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
+                            "parameter": param,
+                            "status": level,
+                            "line": tagged_line,
+                            "phase": phase_name,
+                        })
+                        if len(state["verify_job"]["results"]) > 1200:
+                            state["verify_job"]["results"] = state["verify_job"]["results"][-1200:]
+
+                    # Detect per-component result
+                    passed = "✅" in line and "SUCCESS" in line.upper()
+                    failed = ("❌" in line or ("FAILED" in line.upper() and "exit code" not in line.lower())) and not passed
+
+                    if passed or failed:
+                        event_payload = {
+                            "line": tagged_line,
+                            "passed": passed,
+                            "layer": _v_layer[0],
+                            "module": MODULES[min(_v_mod[0], 4)],
+                            "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
+                            "phase": phase_name,
+                        }
+                        socketio.emit("verify_component", event_payload)
+                        if passed:
+                            state["verify_job"]["pass_count"] = int(state["verify_job"].get("pass_count", 0)) + 1
+                        else:
+                            state["verify_job"]["fail_count"] = int(state["verify_job"].get("fail_count", 0)) + 1
+                        state["verify_job"]["results"].append({
+                            "ts": round(time.time(), 3),
+                            "layer": _v_layer[0],
+                            "module": MODULES[min(_v_mod[0], 4)],
+                            "module_label": MODULE_LABELS.get(MODULES[min(_v_mod[0], 4)], ""),
+                            "parameter": infer_parameter(line),
+                            "status": "pass" if passed else "fail",
+                            "line": tagged_line,
+                            "phase": phase_name,
+                        })
+                        if passed:
+                            _v_mod[0] = min(_v_mod[0] + 1, 4)
+                            emit_verify_progress()
+
+                    # Yield to the event loop
+                    socketio.sleep(0)
+
+                proc.wait()
+                if proc.returncode != 0:
+                    all_success = False
+                    fail_msg = f"{phase_label_str} ❌ FAILED (exit code {proc.returncode})"
+                    state["verify_job"]["log"].append(fail_msg)
+                    socketio.emit("verify_log", {"line": fail_msg})
+
+            success = all_success
+
         except Exception as e:
             state["verify_job"]["log"].append(f"❌ Verifier runtime exception: {e}")
             state["verify_job"]["results"].append({
@@ -1317,9 +1571,22 @@ def api_verify_start():
             })
             success = False
         finally:
-            state["verify_job"]["running"] = False
             duration = time.time() - state["verify_job"]["started_at"]
             state["verify_job"]["success"] = success
+            final_progress = dict(state["verify_job"].get("progress") or {})
+            if success:
+                final_progress["layer"] = end
+                final_progress["end_layer"] = end
+                final_progress["module"] = "skip_connection"
+                final_progress["module_label"] = MODULE_LABELS.get("skip_connection", "Skip Connection")
+                final_progress["module_idx"] = 4
+                final_progress["percent"] = 100
+            else:
+                final_progress["percent"] = min(int(final_progress.get("percent", 0)), 99)
+            final_progress["start_layer"] = start
+            final_progress["end_layer"] = end
+            state["verify_job"]["progress"] = final_progress
+            state["verify_job"]["last_update"] = round(time.time(), 3)
 
             if sid:
                 with get_db_conn() as conn:
@@ -1339,7 +1606,11 @@ def api_verify_start():
                 "success": success,
                 "elapsed": round(duration, 1),
                 "session_id": sid,
+                "phases_run": total_phases if 'total_phases' in dir() else 1,
             })
+            # Give the Socket.IO server loop one cycle to flush terminal completion telemetry.
+            socketio.sleep(0)
+            state["verify_job"]["running"] = False
 
     threading.Thread(target=run, daemon=True).start()
     return jsonify({"success": True, "message": "Verification started"})
@@ -1382,6 +1653,10 @@ def api_verify_status():
         "active": job["running"],
         "log_tail": job["log"][-100:],
         "success": job.get("success"),
+        "progress": job.get("progress"),
+        "pass_count": int(job.get("pass_count", 0) or 0),
+        "fail_count": int(job.get("fail_count", 0) or 0),
+        "last_update": job.get("last_update"),
     })
 
 # ---------------------------------------------------------------------------

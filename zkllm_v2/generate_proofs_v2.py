@@ -119,6 +119,28 @@ class ZkLLMProofGeneratorV2:
             self._link_from_base(f"layer-{i}-mlp.up_proj.weight-int.bin")
             self._link_from_base(f"layer-{i}-input_layernorm.weight-int.bin")
 
+    def _truncate_activation_files(self, layer):
+        """Truncate raw activation bin files to seq_len * embed_dim int32 elements.
+        
+        Activation capture may produce files with more tokens than the configured
+        seq_len (e.g., capture for 10 decode steps but prove for 1 token).
+        All CUDA binaries expect exactly seq_len * embed_dim int32 elements.
+        """
+        import numpy as np
+        expected_bytes = self.seq_len * self.embed_dim * 4  # int32 = 4 bytes
+        
+        # Files that come from the raw activation capture and may have extra tokens
+        raw_files = [
+            self.activation_dir / f"layer-{layer}-block-input.bin",
+            self.activation_dir / f"layer-{layer}-self-attn-output.bin",
+        ]
+        
+        for fpath in raw_files:
+            if fpath.exists() and fpath.stat().st_size > expected_bytes:
+                data = np.fromfile(str(fpath), dtype=np.int32, count=self.seq_len * self.embed_dim)
+                data.tofile(str(fpath))
+                print(f"  ✂️  Truncated {fpath.name} to {self.seq_len}×{self.embed_dim} ({len(data)} int32s)")
+
     def _load_model_params(self):
         """Load model once and extract parameters needed for proof generation"""
         self.layer_input_eps = {}
@@ -414,6 +436,7 @@ class ZkLLMProofGeneratorV2:
             'skip_connection': False
         }
         self._ensure_layer_links(layer)
+        self._truncate_activation_files(layer)
         
         # 1. Input RMSNorm
         print(f"\n[1/5] Input RMSNorm")

@@ -182,11 +182,12 @@ function parseBackendTimestamp(rawTs) {
   let ts = String(rawTs).trim();
   if (!ts) return null;
 
-  // SQLite CURRENT_TIMESTAMP is UTC "YYYY-MM-DD HH:MM:SS".
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(ts)) {
-    ts = ts.replace(' ', 'T') + 'Z';
-  } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(ts)) {
-    ts = ts + 'Z';
+  // Normalize backend timestamp variants to ISO-8601.
+  // Treat missing timezone as UTC (SQLite CURRENT_TIMESTAMP semantics).
+  const sqliteLike = ts.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2})?$/);
+  if (sqliteLike) {
+    const [, ymd, hms, tz] = sqliteLike;
+    ts = `${ymd}T${hms}${tz || 'Z'}`;
   }
 
   let d = new Date(ts);
@@ -379,6 +380,11 @@ function closeLayerModal() {
 // ---------------------------------------------------------------------------
 // Session Conversation Modal
 // ---------------------------------------------------------------------------
+function isVerifierDashboardView() {
+  const p = (window.location.pathname || '').toLowerCase();
+  return p.includes('/verifier');
+}
+
 function ensureSessionDetailsModal() {
   let overlay = document.getElementById('session-details-modal');
   if (overlay) return overlay;
@@ -398,12 +404,31 @@ function ensureSessionDetailsModal() {
 
       <div id="session-details-tabs" style="display:flex; gap:0.5rem; margin-bottom:1rem;">
         <button id="session-tab-prompt" class="btn btn-sm" style="background:rgba(99,102,241,0.12); color:var(--indigo); border-color:rgba(99,102,241,0.28);">Prompt</button>
+        <button id="session-tab-response" class="btn btn-sm btn-ghost" style="color:var(--text-muted);">Response</button>
+        <button id="session-tab-proof" class="btn btn-sm btn-ghost" style="color:var(--text-muted);">Proof Log</button>
         <button id="session-tab-audit" class="btn btn-sm btn-ghost" style="color:var(--text-muted);">Verification Audit</button>
       </div>
 
       <div id="session-panel-prompt" style="margin-bottom:1rem;">
         <div style="font-size:0.7rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-muted); margin-bottom:0.4rem;">Prompt</div>
         <div id="session-details-prompt" style="white-space:pre-wrap; font-family:'JetBrains Mono', monospace; font-size:0.85rem; padding:0.75rem; border-radius:var(--radius-sm); background:var(--code-bg); border:1px solid var(--border); min-height:80px;"></div>
+      </div>
+
+      <div id="session-panel-response" style="display:none; margin-bottom:1.5rem;">
+        <div style="font-size:0.7rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-muted); margin-bottom:0.4rem;">Response</div>
+        <div id="session-details-response" style="white-space:pre-wrap; font-family:'JetBrains Mono', monospace; font-size:0.85rem; padding:0.75rem; border-radius:var(--radius-sm); background:var(--code-bg); border:1px solid var(--border); min-height:120px;"></div>
+      </div>
+
+      <div id="session-proof-toggle-wrap" style="display:none; margin:-0.8rem 0 1rem 0;">
+        <button id="session-proof-toggle-btn" class="btn btn-sm btn-ghost" style="font-size:0.74rem; color:var(--amber); border-color:rgba(245,158,11,0.28);">Show Proof Generation Log</button>
+      </div>
+
+      <div id="session-panel-proof" style="display:none; margin-bottom:1.5rem;">
+        <div class="flex-between" style="margin-bottom:0.45rem; gap:0.75rem;">
+          <div style="font-size:0.7rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--text-muted);">Proof Generation Log</div>
+          <div id="session-proof-summary" class="badge badge-neutral">Loading…</div>
+        </div>
+        <div id="session-details-proof" style="max-height:320px; overflow:auto; font-family:'JetBrains Mono', monospace; font-size:0.8rem; padding:0.75rem; border-radius:var(--radius-sm); background:var(--code-bg); border:1px solid var(--border); min-height:120px;"></div>
       </div>
 
       <div id="session-panel-audit" style="display:none; margin-bottom:1.5rem;">
@@ -427,32 +452,80 @@ function ensureSessionDetailsModal() {
   document.body.appendChild(overlay);
 
   const tabPrompt = overlay.querySelector('#session-tab-prompt');
+  const tabResponse = overlay.querySelector('#session-tab-response');
+  const tabProof = overlay.querySelector('#session-tab-proof');
   const tabAudit = overlay.querySelector('#session-tab-audit');
+  const proofToggleWrap = overlay.querySelector('#session-proof-toggle-wrap');
+  const proofToggleBtn = overlay.querySelector('#session-proof-toggle-btn');
+
+  const tabsWrap = overlay.querySelector('#session-details-tabs');
+  const panelMeta = overlay.querySelector('#session-panel-meta');
   const panelPrompt = overlay.querySelector('#session-panel-prompt');
+  const panelResponse = overlay.querySelector('#session-panel-response');
+  const panelProof = overlay.querySelector('#session-panel-proof');
   const panelAudit = overlay.querySelector('#session-panel-audit');
 
   const switchTab = (tab) => {
-    const promptActive = tab === 'prompt';
-    if (panelPrompt) panelPrompt.style.display = promptActive ? '' : 'none';
-    if (panelAudit) panelAudit.style.display = promptActive ? 'none' : '';
+    const isPrompt = tab === 'prompt';
+    const isResponse = tab === 'response';
+    const isProof = tab === 'proof';
+    const isAudit = tab === 'audit';
 
-    if (tabPrompt) {
-      tabPrompt.className = promptActive ? 'btn btn-sm' : 'btn btn-sm btn-ghost';
-      tabPrompt.style.background = promptActive ? 'rgba(99,102,241,0.12)' : 'transparent';
-      tabPrompt.style.color = promptActive ? 'var(--indigo)' : 'var(--text-muted)';
-      tabPrompt.style.borderColor = promptActive ? 'rgba(99,102,241,0.28)' : 'var(--border)';
-    }
-    if (tabAudit) {
-      tabAudit.className = promptActive ? 'btn btn-sm btn-ghost' : 'btn btn-sm';
-      tabAudit.style.background = promptActive ? 'transparent' : 'rgba(16,185,129,0.12)';
-      tabAudit.style.color = promptActive ? 'var(--text-muted)' : 'var(--emerald)';
-      tabAudit.style.borderColor = promptActive ? 'var(--border)' : 'rgba(16,185,129,0.28)';
+    if (panelPrompt) panelPrompt.style.display = isPrompt ? '' : 'none';
+    if (panelResponse) panelResponse.style.display = isResponse ? '' : 'none';
+    if (panelProof) panelProof.style.display = isProof ? '' : 'none';
+    if (panelAudit) panelAudit.style.display = isAudit ? '' : 'none';
+
+    const styleTab = (btn, active, activeColor, activeBg, activeBorder) => {
+      if (!btn) return;
+      btn.className = active ? 'btn btn-sm' : 'btn btn-sm btn-ghost';
+      btn.style.background = active ? activeBg : 'transparent';
+      btn.style.color = active ? activeColor : 'var(--text-muted)';
+      btn.style.borderColor = active ? activeBorder : 'var(--border)';
+    };
+
+    styleTab(tabPrompt, isPrompt, 'var(--indigo)', 'rgba(99,102,241,0.12)', 'rgba(99,102,241,0.28)');
+    styleTab(tabResponse, isResponse, 'var(--sky)', 'rgba(14,165,233,0.12)', 'rgba(14,165,233,0.28)');
+    styleTab(tabProof, isProof, 'var(--amber)', 'rgba(245,158,11,0.12)', 'rgba(245,158,11,0.28)');
+    styleTab(tabAudit, isAudit, 'var(--emerald)', 'rgba(16,185,129,0.12)', 'rgba(16,185,129,0.28)');
+  };
+
+  const configureModal = (mode) => {
+    const verifierMode = mode === 'verifier';
+    if (panelMeta) panelMeta.style.display = verifierMode ? '' : 'none';
+    if (tabsWrap) tabsWrap.style.display = verifierMode ? 'flex' : 'none';
+    if (proofToggleWrap) proofToggleWrap.style.display = verifierMode ? 'none' : '';
+
+    if (tabResponse) tabResponse.style.display = verifierMode ? 'none' : '';
+    if (tabProof) tabProof.style.display = verifierMode ? '' : 'none';
+    if (tabAudit) tabAudit.style.display = verifierMode ? '' : 'none';
+
+    if (verifierMode) {
+      switchTab('prompt');
+    } else {
+      // User/provider/master dashboard behavior: prompt + response only.
+      if (panelPrompt) panelPrompt.style.display = '';
+      if (panelResponse) panelResponse.style.display = '';
+      if (panelProof) panelProof.style.display = 'none';
+      if (panelAudit) panelAudit.style.display = 'none';
+      if (proofToggleBtn) proofToggleBtn.textContent = 'Show Proof Generation Log';
     }
   };
 
   if (tabPrompt) tabPrompt.addEventListener('click', () => switchTab('prompt'));
+  if (tabResponse) tabResponse.addEventListener('click', () => switchTab('response'));
+  if (tabProof) tabProof.addEventListener('click', () => switchTab('proof'));
   if (tabAudit) tabAudit.addEventListener('click', () => switchTab('audit'));
+  if (proofToggleBtn) {
+    proofToggleBtn.addEventListener('click', () => {
+      if (!panelProof) return;
+      const opening = panelProof.style.display === 'none';
+      panelProof.style.display = opening ? '' : 'none';
+      proofToggleBtn.textContent = opening ? 'Hide Proof Generation Log' : 'Show Proof Generation Log';
+    });
+  }
   overlay.__switchSessionTab = switchTab;
+  overlay.__configureSessionModal = configureModal;
 
   return overlay;
 }
@@ -475,8 +548,12 @@ window.showSessionDetailsModal = async function(sessionId) {
   const sub = document.getElementById('session-details-sub');
   const metaBox = document.getElementById('session-details-meta');
   const promptBox = document.getElementById('session-details-prompt');
+  const responseBox = document.getElementById('session-details-response');
+  const proofBox = document.getElementById('session-details-proof');
+  const proofSummary = document.getElementById('session-proof-summary');
   const auditBox = document.getElementById('session-details-audit');
   const auditSummary = document.getElementById('session-audit-summary');
+  const verifierMode = isVerifierDashboardView();
 
   const renderAuditEvent = (ev) => {
     const status = ev?.status || 'info';
@@ -517,17 +594,61 @@ window.showSessionDetailsModal = async function(sessionId) {
       .filter((ev) => ev.status !== 'info' || /step\s+\d+|verify|proof|sumcheck|softmax|projection|zero-check/i.test(String(ev.line)));
   };
 
+  const deriveProofEventsFromLines = (lines = []) => {
+    return lines
+      .filter(Boolean)
+      .map((line) => {
+        const lc = String(line).toLowerCase();
+        let status = 'info';
+        if (line.includes('✅') || lc.includes(' success')) status = 'pass';
+        else if (line.includes('❌') || lc.includes(' failed') || lc.startsWith('error')) status = 'fail';
+        else if (line.includes('⚠') || lc.includes('warning')) status = 'warn';
+
+        const lm = String(line).match(/layer\s+(\d+)/i);
+        const sm = String(line).match(/\[(\d+)\/5\]\s+(.+)/);
+        return {
+          layer: lm ? Number(lm[1]) : null,
+          component: sm ? sm[2].trim() : null,
+          status,
+          line,
+        };
+      })
+      .filter((ev) => ev.status !== 'info' || /\[(\d+)\/5\]|processing layer|completed|failed|success/i.test(String(ev.line)));
+  };
+
+  const renderProofEvent = (ev) => {
+    const status = ev?.status || 'info';
+    const icon = status === 'pass' ? '✅' : status === 'fail' ? '❌' : status === 'warn' ? '⚠️' : '•';
+    const color = status === 'pass' ? 'var(--emerald)' : status === 'fail' ? 'var(--rose)' : status === 'warn' ? 'var(--amber)' : 'var(--text-secondary)';
+    const layer = Number.isFinite(Number(ev?.layer)) ? `L${ev.layer}` : 'L?';
+    const component = ev?.component || 'proof';
+    return `
+      <div style="padding:0.5rem 0.25rem; border-bottom:1px dashed var(--border);">
+        <div style="color:${color}; font-weight:700; font-size:0.75rem;">${icon} ${layer} · ${escapeHTML(String(component))}</div>
+        <div style="color:var(--text-secondary); margin-top:0.15rem; line-height:1.45;">${escapeHTML(String(ev?.line || ''))}</div>
+      </div>
+    `;
+  };
+
   if (title) title.textContent = 'Session Trace';
   if (sub) sub.textContent = `Session #${sessionId}`;
-  if (metaBox) metaBox.innerHTML = '<div style="opacity:0.7; grid-column:1 / -1;">Loading metadata…</div>';
+  if (metaBox) metaBox.innerHTML = verifierMode ? '<div style="opacity:0.7; grid-column:1 / -1;">Loading metadata…</div>' : '';
   if (promptBox) promptBox.textContent = 'Loading prompt...';
+  if (responseBox) responseBox.textContent = 'Loading response...';
+  if (proofBox) proofBox.innerHTML = '<div style="opacity:0.7;">Loading proof generation log…</div>';
+  if (proofSummary) {
+    proofSummary.className = 'badge badge-neutral';
+    proofSummary.textContent = 'Loading…';
+  }
   if (auditBox) auditBox.innerHTML = '<div style="opacity:0.7;">Loading verification audit log…</div>';
   if (auditSummary) {
     auditSummary.className = 'badge badge-neutral';
     auditSummary.textContent = 'Loading…';
   }
 
-  if (typeof overlay.__switchSessionTab === 'function') {
+  if (typeof overlay.__configureSessionModal === 'function') {
+    overlay.__configureSessionModal(verifierMode ? 'verifier' : 'basic');
+  } else if (typeof overlay.__switchSessionTab === 'function') {
     overlay.__switchSessionTab('prompt');
   }
 
@@ -540,6 +661,12 @@ window.showSessionDetailsModal = async function(sessionId) {
       const msg = data.error || 'Session not found';
       if (metaBox) metaBox.innerHTML = `<div style="color:var(--rose); grid-column:1 / -1;">${escapeHTML(msg)}</div>`;
       if (promptBox) promptBox.textContent = msg;
+      if (responseBox) responseBox.textContent = '';
+      if (proofBox) proofBox.innerHTML = '<div style="opacity:0.7;">No proof log available.</div>';
+      if (proofSummary) {
+        proofSummary.className = 'badge badge-rose';
+        proofSummary.textContent = 'Unavailable';
+      }
       if (auditBox) auditBox.innerHTML = '<div style="opacity:0.7;">No audit details found.</div>';
       if (auditSummary) {
         auditSummary.className = 'badge badge-rose';
@@ -557,23 +684,60 @@ window.showSessionDetailsModal = async function(sessionId) {
     `;
 
     if (metaBox) {
-      metaBox.innerHTML = [
-        kv('Session', `#${data.id ?? sessionId}`),
-        kv('User', data.username || (data.user_id ? `user-${data.user_id}` : '—')),
-        kv('Model', data.model_id || '—'),
-        kv('Occurred (IST)', tsFmt.datetime),
-        kv('Inference Status', (data.inference_status || '—').toUpperCase()),
-        kv('Proof Status', (data.proof_status || '—').toUpperCase()),
-        kv('Proof Duration', Number.isFinite(Number(data.proof_duration)) ? `${data.proof_duration}s` : '—'),
-        kv('Verification Status', (data.verify_status || '—').toUpperCase()),
-        kv('Verification Duration', Number.isFinite(Number(data.verify_duration)) ? `${data.verify_duration}s` : '—'),
-        kv('Verification Runs', Number.isFinite(Number(data.verify_runs)) ? data.verify_runs : 0),
-        kv('Requested Verify', data.request_verify ? 'Yes' : 'No'),
-        kv('C2PA State', data.c2pa_status || '—'),
-      ].join('');
+      if (verifierMode) {
+        metaBox.innerHTML = [
+          kv('Session', `#${data.id ?? sessionId}`),
+          kv('User', data.username || (data.user_id ? `user-${data.user_id}` : '—')),
+          kv('Model', data.model_id || '—'),
+          kv('Occurred (IST)', tsFmt.datetime),
+          kv('Inference Status', (data.inference_status || '—').toUpperCase()),
+          kv('Proof Status', (data.proof_status || '—').toUpperCase()),
+          kv('Proof Duration', Number.isFinite(Number(data.proof_duration)) ? `${data.proof_duration}s` : '—'),
+          kv('Verification Status', (data.verify_status || '—').toUpperCase()),
+          kv('Verification Duration', Number.isFinite(Number(data.verify_duration)) ? `${data.verify_duration}s` : '—'),
+          kv('Verification Runs', Number.isFinite(Number(data.verify_runs)) ? data.verify_runs : 0),
+          kv('Requested Verify', data.request_verify ? 'Yes' : 'No'),
+          kv('C2PA State', data.c2pa_status || '—'),
+        ].join('');
+      } else {
+        metaBox.innerHTML = '';
+      }
     }
 
     if (promptBox) promptBox.textContent = data.prompt || '(no prompt stored)';
+    if (responseBox) {
+      if (data.response) responseBox.textContent = data.response;
+      else if (data.inference_status === 'running') responseBox.textContent = 'Response not ready yet.';
+      else responseBox.textContent = 'No response stored for this session.';
+    }
+
+    const proofStructured = Array.isArray(data.proof_audit) ? data.proof_audit : [];
+    const proofFallback = proofStructured.length ? [] : (Array.isArray(data.proof_log) ? deriveProofEventsFromLines(data.proof_log) : []);
+    const proofEvents = (proofStructured.length ? proofStructured : proofFallback).slice(-250);
+    const proofPass = proofEvents.filter(e => e.status === 'pass').length;
+    const proofFail = proofEvents.filter(e => e.status === 'fail').length;
+    const proofWarn = proofEvents.filter(e => e.status === 'warn').length;
+
+    if (proofSummary) {
+      if (!proofEvents.length) {
+        proofSummary.className = 'badge badge-neutral';
+        proofSummary.textContent = 'No proof log';
+      } else if (proofFail > 0) {
+        proofSummary.className = 'badge badge-rose';
+        proofSummary.textContent = `${proofPass} pass · ${proofFail} fail · ${proofWarn} warn`;
+      } else {
+        proofSummary.className = 'badge badge-success';
+        proofSummary.textContent = `${proofPass} pass · ${proofWarn} warn`;
+      }
+    }
+
+    if (proofBox) {
+      if (!proofEvents.length) {
+        proofBox.innerHTML = '<div style="opacity:0.7;">No proof generation log available for this session yet.</div>';
+      } else {
+        proofBox.innerHTML = proofEvents.map(renderProofEvent).join('');
+      }
+    }
 
     const structured = Array.isArray(data.verify_audit) ? data.verify_audit : [];
     const fallback = structured.length ? [] : (Array.isArray(data.verify_log) ? deriveAuditEventsFromLines(data.verify_log) : []);
@@ -583,7 +747,10 @@ window.showSessionDetailsModal = async function(sessionId) {
     const warnCount = events.filter(e => e.status === 'warn').length;
 
     if (auditSummary) {
-      if (!events.length) {
+      if (!verifierMode) {
+        auditSummary.className = 'badge badge-neutral';
+        auditSummary.textContent = 'Hidden';
+      } else if (!events.length) {
         auditSummary.className = 'badge badge-neutral';
         auditSummary.textContent = 'No audit log';
       } else if (failCount > 0) {
@@ -596,7 +763,9 @@ window.showSessionDetailsModal = async function(sessionId) {
     }
 
     if (auditBox) {
-      if (!events.length) {
+      if (!verifierMode) {
+        auditBox.innerHTML = '<div style="opacity:0.7;">Verification audit details are available only in the verifier dashboard.</div>';
+      } else if (!events.length) {
         auditBox.innerHTML = '<div style="opacity:0.7;">No layer/parameter verification log available for this session yet.</div>';
       } else {
         const byLayerParam = new Map();
@@ -638,6 +807,12 @@ window.showSessionDetailsModal = async function(sessionId) {
   } catch (err) {
     if (metaBox) metaBox.innerHTML = '<div style="color:var(--rose); grid-column:1 / -1;">Failed to load metadata.</div>';
     if (promptBox) promptBox.textContent = 'Failed to load session.';
+    if (responseBox) responseBox.textContent = '';
+    if (proofBox) proofBox.innerHTML = '<div style="color:var(--rose);">Failed to load proof log.</div>';
+    if (proofSummary) {
+      proofSummary.className = 'badge badge-rose';
+      proofSummary.textContent = 'Load failed';
+    }
     if (auditBox) auditBox.innerHTML = '<div style="color:var(--rose);">Failed to load audit details.</div>';
     if (auditSummary) {
       auditSummary.className = 'badge badge-rose';
@@ -655,11 +830,13 @@ function stopVerifyFastWatcher() {
 
 function startVerifyFastWatcher() {
   stopVerifyFastWatcher();
-  const startedAt = Date.now();
   window.__VERIFY_FAST_WATCHER__ = setInterval(async () => {
     try {
       const resp = await fetch('/api/verify/status', { cache: 'no-store' });
       const data = await resp.json();
+      if (typeof window._updateVerifyTrackerFromStatus === 'function') {
+        window._updateVerifyTrackerFromStatus(data);
+      }
       if (!data.active) {
         stopVerifyFastWatcher();
         setVerifierControls(false);
@@ -667,9 +844,7 @@ function startVerifyFastWatcher() {
         // Catch DB/write races when verification ends very quickly.
         setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 350);
         setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 1200);
-      }
-      if (Date.now() - startedAt > 120000) {
-        stopVerifyFastWatcher();
+        setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 2500);
       }
     } catch (_) {}
   }, 600);
@@ -1185,7 +1360,7 @@ async function initUser() {
       appendTerminal('proof-console', data.line);
     });
 
-    socket.on('inference_log', (data) => {
+    socket.off('inference_log').on('inference_log', (data) => {
       appendTerminal('inference-log-console', data.line);
     });
 
@@ -1239,6 +1414,21 @@ async function initUser() {
 }
 
 
+function promptForMaxNewTokens() {
+  const minTokens = 1;
+  const raw = window.prompt(`Max new tokens to generate (>= ${minTokens}):`, '1');
+  if (raw === null) return null;
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < minTokens) {
+    toast(`Please enter a valid integer >= ${minTokens}.`, 'error');
+    return null;
+  }
+
+  return parsed;
+}
+
+
 async function handlePromptSubmit(e) {
   e.preventDefault();
   const input = document.getElementById('prompt-input').value;
@@ -1246,6 +1436,13 @@ async function handlePromptSubmit(e) {
   const genBtn = document.getElementById('generate-proof-btn');
   
   if (!input.trim()) return;
+
+  const maxNewTokens = promptForMaxNewTokens();
+  if (maxNewTokens === null) {
+    toast('Inference cancelled.', 'info', 2200);
+    return;
+  }
+
   const chatArea = document.getElementById('chat-area');
   
   chatArea.innerHTML = `
@@ -1262,7 +1459,7 @@ async function handlePromptSubmit(e) {
     const res = await fetch('/api/prompt', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ prompt: input, request_verify: true })
+      body: JSON.stringify({ prompt: input, request_verify: true, max_new_tokens: maxNewTokens })
     });
     
     if (!res.ok) {
@@ -1281,7 +1478,7 @@ async function handlePromptSubmit(e) {
       <div id="ai-loading-box" class="chat-msg chat-ai">
         <div class="chat-label">ZK-LLM Model</div>
         <div class="engine-log" id="inference-log-console" style="font-size: 0.8rem; opacity: 0.7; margin-bottom: 0.5rem; max-height: 100px; overflow-y: auto;">
-          Starting background engine...
+          Starting background engine (max new tokens: ${maxNewTokens})...
         </div>
         <div class="progress-container" style="height: 4px; background: rgba(255,255,255,0.05); border-radius: 2px;">
           <div id="inference-pb-fill" style="width: 0%; height: 100%; background: var(--indigo); transition: width 0.3s;"></div>
@@ -1393,6 +1590,7 @@ async function initVerifier() {
       refreshLedgerNow({ syncVerifierState: true });
       setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 300);
       setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 1200);
+      setTimeout(() => refreshLedgerNow({ syncVerifierState: true }), 2500);
     });
   }
 }
@@ -1423,6 +1621,9 @@ async function loadVerifierState() {
     
     const vRes = await fetch('/api/verify/status');
     const vData = await vRes.json();
+    if (typeof window._updateVerifyTrackerFromStatus === 'function') {
+      window._updateVerifyTrackerFromStatus(vData);
+    }
     const wasRunning = !!window.__VERIFY_ACTIVE_LAST__;
     if (vData.active || vData.success !== null) {
       if (vData.log_tail) {
@@ -1622,7 +1823,8 @@ async function loadSessions(modelFilter = null) {
                 return `<div style="display:flex; align-items:center;"><span class="badge ${cls}">${icon}${label}</span>${timeStr}</div>`;
             };
 
-            const infoBtn = `<button class="btn btn-sm btn-ghost" onclick="showSessionDetailsModal('${s.id}')" style="color:var(--text-muted); font-size:0.95rem; line-height:1; padding:0.1rem 0.4rem;" title="View Prompt & Audit">ℹ️</button>`;
+            const infoBtnTitle = isVerifier ? 'View Prompt, Proof & Audit' : 'View Prompt & Response';
+            const infoBtn = `<button class="btn btn-sm btn-ghost" onclick="showSessionDetailsModal('${s.id}')" style="color:var(--text-muted); font-size:0.95rem; line-height:1; padding:0.1rem 0.4rem;" title="${infoBtnTitle}">ℹ️</button>`;
             const c2paActionBtn = s.c2pa_status === 'signed'
                 ? `<a href="/api/c2pa/receipt/${s.id}" class="btn btn-sm" style="background:rgba(16,185,129,0.1); color:var(--emerald); border-color:rgba(16,185,129,0.2); text-decoration:none;" title="Download signed JPEG receipt">🔏 Receipt</a>`
                 : '';
@@ -1879,13 +2081,5 @@ document.getElementById('zen-overlay')?.addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 // Auto-Initialization
 // ---------------------------------------------------------------------------
-document.addEventListener('DOMContentLoaded', async () => {
-    const path = window.location.pathname;
-    if (path.includes('provider')) {
-        await initProvider();
-    } else if (path.includes('verifier')) {
-        await initVerifier();
-    } else if (path.includes('dashboard') || path.includes('user')) {
-        await initUser();
-    }
-});
+// NOTE: role-specific initialization is already handled in the primary
+// DOMContentLoaded handler near the top of this file.

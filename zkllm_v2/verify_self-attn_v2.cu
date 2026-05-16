@@ -110,14 +110,20 @@ int main(int argc, char* argv[]) {
         cout << "Step 3: Loading input activations..." << endl;
         cout << "  Input file: " << input_activation_file << endl;
         
-        FrTensor X = FrTensor::from_int_bin(input_activation_file);
+        FrTensor X_raw = FrTensor::from_int_bin(input_activation_file);
         
         cout << "  ✓ Input activations loaded" << endl;
-        cout << "    - Tensor size: " << X.size << " elements" << endl;
+        cout << "    - Tensor size: " << X_raw.size << " elements" << endl;
         cout << "    - Expected: " << L << " x " << E << " = " << (L * E) << endl;
         
-        if (X.size != L * E) {
-            throw runtime_error("Input activation size mismatch!");
+        // Pad input to match proof's padded L dimension (same as prover)
+        FrTensor X(L * E);
+        if (X_raw.size >= L * E) {
+            cudaMemcpy(X.gpu_data, X_raw.gpu_data, sizeof(Fr_t) * L * E, cudaMemcpyDeviceToDevice);
+        } else {
+            cudaMemcpy(X.gpu_data, X_raw.gpu_data, sizeof(Fr_t) * X_raw.size, cudaMemcpyDeviceToDevice);
+            cudaMemset(X.gpu_data + X_raw.size, 0, sizeof(Fr_t) * (L * E - X_raw.size));
+            cout << "    - Padded from " << X_raw.size << " to " << L * E << " (zero-filled)" << endl;
         }
         cout << endl;
 

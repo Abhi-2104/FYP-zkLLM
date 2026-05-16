@@ -34,8 +34,19 @@ int main(int argc, char *argv[])
         1, embed_dim
     );
 
-    FrTensor X = FrTensor::from_int_bin(input_file_name);
+    FrTensor X_raw = FrTensor::from_int_bin(input_file_name);
     FrTensor rms_inv_temp = FrTensor::from_int_bin(rms_inv_file);
+
+    // Truncate X to seq_len * embed_dim if the activation file has more tokens
+    uint expected_size = seq_len * embed_dim;
+    FrTensor X(expected_size);
+    if (X_raw.size >= expected_size) {
+        cudaMemcpy(X.gpu_data, X_raw.gpu_data, sizeof(Fr_t) * expected_size, cudaMemcpyDeviceToDevice);
+    } else {
+        // Pad with zeros if too small
+        cudaMemcpy(X.gpu_data, X_raw.gpu_data, sizeof(Fr_t) * X_raw.size, cudaMemcpyDeviceToDevice);
+        cudaMemset(X.gpu_data + X_raw.size, 0, sizeof(Fr_t) * (expected_size - X_raw.size));
+    }
 
     FrTensor all_one(seq_len);
     all_one *= {0, 0, 0, 0, 0, 0, 0, 0};

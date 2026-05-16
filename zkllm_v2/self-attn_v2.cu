@@ -80,7 +80,22 @@ int main(int argc, char *argv[])
     // Load input activations
     cout << "Loading input activations..." << endl;
     FrTensor X = FrTensor::from_int_bin(input_file);
-    cout << "✓ Input loaded: " << X.size << " elements\n" << endl;
+    cout << "✓ Input loaded: " << X.size << " elements" << endl;
+
+    // Pad L to next power of 2 (minimum 2) so challenge vectors are non-empty.
+    // With L=1, ceilLog2(1)=0 → empty u_batch → verifier rejects proof.
+    // Zero-padding extra rows is cryptographically sound.
+    uint original_output_size = L * E;  // Save original size for output truncation
+    uint L_padded = max(2u, 1u << ceilLog2(L));
+    if (L_padded != L) {
+        cout << "  Padding L from " << L << " to " << L_padded << " for proof generation" << endl;
+        FrTensor X_padded(L_padded * E);
+        cudaMemcpy(X_padded.gpu_data, X.gpu_data, sizeof(Fr_t) * X.size, cudaMemcpyDeviceToDevice);
+        cudaMemset(X_padded.gpu_data + X.size, 0, sizeof(Fr_t) * (L_padded * E - X.size));
+        X = std::move(X_padded);
+        L = L_padded;
+    }
+    cout << endl;
 
     cout << "Generating self-attention proof..." << endl;
 
@@ -346,8 +361,16 @@ int main(int argc, char *argv[])
     save_self_attn_proof(proof, proof_path);
     cout << "    ✅ Proof saved successfully!" << endl;
     
-    // Save output
-    final_output.unmont().save_int(output_file);
+    // Save output (original size, not padded)
+    FrTensor final_unmont = final_output.unmont();
+    if (final_unmont.size > original_output_size) {
+        FrTensor output_truncated(original_output_size);
+        cudaMemcpy(output_truncated.gpu_data, final_unmont.gpu_data, sizeof(Fr_t) * original_output_size, cudaMemcpyDeviceToDevice);
+        output_truncated.save_int(output_file);
+        cout << "  Output truncated from " << final_unmont.size << " to " << original_output_size << " for downstream" << endl;
+    } else {
+        final_unmont.save_int(output_file);
+    }
 
     cout << "✅ Self-attention proof generated successfully!\n" << endl;
     cout << "  📊 Proof breakdown:" << endl;

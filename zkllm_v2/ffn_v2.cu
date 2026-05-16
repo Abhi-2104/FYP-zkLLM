@@ -51,6 +51,21 @@ int main(int argc, char *argv[])
     cout << "Loading input..." << endl;
     auto input_ptr = std::make_unique<FrTensor>(FrTensor::from_int_bin(input_file_name));
     cout << "  ✓ Input loaded: " << input_ptr->size << " elements" << endl;
+
+    // Pad batch dimension to next power of 2 (minimum 2) so challenge vectors are non-empty.
+    // With seq_len=1, batchSize=1 → ceilLog2(1)=0 → empty u_batch → verifier rejects.
+    uint batch_size = input_ptr->size / embed_dim;
+    uint original_output_size = batch_size * embed_dim;  // Save original size for output truncation
+    uint batch_padded = max(2u, 1u << ceilLog2(batch_size));
+    if (batch_padded != batch_size) {
+        cout << "  Padding batch from " << batch_size << " to " << batch_padded << " for proof generation" << endl;
+        uint padded_total = batch_padded * embed_dim;
+        auto padded_input = std::make_unique<FrTensor>(padded_total);
+        cudaMemcpy(padded_input->gpu_data, input_ptr->gpu_data, sizeof(Fr_t) * input_ptr->size, cudaMemcpyDeviceToDevice);
+        cudaMemset(padded_input->gpu_data + input_ptr->size, 0, sizeof(Fr_t) * (padded_total - input_ptr->size));
+        input_ptr = std::move(padded_input);
+        seq_len = batch_padded;
+    }
     print_gpu_memory("after input");
 
     // ===== Load SwiGLU Table (needed for activation) =====
@@ -155,17 +170,30 @@ int main(int argc, char *argv[])
         swiglu_m_ptr = std::make_unique<FrTensor>(std::move(p.second));
         cout << "  ✓ SwiGLU activation computed" << endl;
 
-        // Generate SwiGLU proof parameters
-        ffn_proof.swiglu_u = random_vec(ceilLog2(seq_len * hidden_dim));
-        ffn_proof.swiglu_v = random_vec(ceilLog2(seq_len * hidden_dim));
+        // Pad for proof generation (D must be divisible by table.size and power of 2)
+        uint D = gate_out_ptr->size;
+        uint N = swiglu.table.size;
+        uint padded_size = N;
+        while(padded_size < D) padded_size *= 2; 
+
+        FrTensor gate_padded(padded_size);
+        cudaMemcpy(gate_padded.gpu_data, gate_out_ptr->gpu_data, sizeof(Fr_t) * D, cudaMemcpyDeviceToDevice);
+        cudaMemset(gate_padded.gpu_data + D, 0, sizeof(Fr_t) * (padded_size - D));
+
+        auto p_padded = swiglu(gate_padded);
+        FrTensor swiglu_out_padded = std::move(p_padded.first);
+        FrTensor swiglu_m_padded = std::move(p_padded.second);
+
+        // Generate SwiGLU proof parameters (using padded sizes)
+        ffn_proof.swiglu_u = random_vec(ceilLog2(padded_size));
+        ffn_proof.swiglu_v = random_vec(ceilLog2(padded_size));
         auto temp_rand = random_vec(3);
         ffn_proof.swiglu_r = temp_rand[0];
         ffn_proof.swiglu_alpha = temp_rand[1];
         ffn_proof.swiglu_beta = temp_rand[2];
         
-        // Generate SwiGLU proof using tLookupRangeMapping
-        // S_in = gate_out, S_out = swiglu_out, m = swiglu_m
-        swiglu.prove(*gate_out_ptr, *swiglu_out_ptr, *swiglu_m_ptr,
+        // Generate SwiGLU proof using padded tensors
+        swiglu.prove(gate_padded, swiglu_out_padded, swiglu_m_padded,
                      ffn_proof.swiglu_r, ffn_proof.swiglu_alpha, ffn_proof.swiglu_beta,
                      ffn_proof.swiglu_u, ffn_proof.swiglu_v, ffn_proof.swiglu_proof);
         cout << "  ✓ SwiGLU proof: " << ffn_proof.swiglu_proof.size() << " polynomials" << endl;
@@ -235,10 +263,18 @@ int main(int argc, char *argv[])
     save_ffn_proof(ffn_proof, proof_filename);
     cout << "  ✓ Proof saved to: " << proof_filename << endl;
 
-    // ===== Save Output Activations =====
+    // ===== Save Output Activations (original size, not padded) =====
     cout << "Saving output activations..." << endl;
-    down_out_ptr->save_int(output_file_name);
-    cout << "  ✓ Output saved to: " << output_file_name << endl;
+    if (down_out_ptr->size > original_output_size) {
+        // Truncate to original batch size for downstream stages (skip-connection)
+        FrTensor output_truncated(original_output_size);
+        cudaMemcpy(output_truncated.gpu_data, down_out_ptr->gpu_data, sizeof(Fr_t) * original_output_size, cudaMemcpyDeviceToDevice);
+        output_truncated.save_int(output_file_name);
+        cout << "  ✓ Output saved (truncated from " << down_out_ptr->size << " to " << original_output_size << "): " << output_file_name << endl;
+    } else {
+        down_out_ptr->save_int(output_file_name);
+        cout << "  ✓ Output saved to: " << output_file_name << endl;
+    }
 
     // ===== Summary =====
     cout << "\n" << string(70, '=') << endl;

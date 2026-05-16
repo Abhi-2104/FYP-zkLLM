@@ -45,13 +45,28 @@ vector<Claim> Rescaling::prove(const FrTensor& X, const FrTensor& X_)
         throw std::runtime_error("Error: the size of X and X_ should be the same.");
     }
 
-    auto u = random_vec(ceilLog2(X.size));
-    auto v = random_vec(ceilLog2(X.size));
+    // Challenge for the sanity check
+    auto u_check = random_vec(ceilLog2(X.size));
+
+    auto rem = rem_tensor_ptr -> pad({rem_tensor_ptr -> size});
     
+    // Ensure rem.size >= table.size and is a multiple of table.size (for tLookup)
+    uint table_size = tl_rem.table.size;
+    if (rem.size < table_size) {
+        uint padded_size = table_size; // table_size is a power of 2
+        FrTensor rem_padded(padded_size);
+        cudaMemcpy(rem_padded.gpu_data, rem.gpu_data, sizeof(Fr_t) * rem.size, cudaMemcpyDeviceToDevice);
+        cudaMemset(rem_padded.gpu_data + rem.size, 0, sizeof(Fr_t) * (padded_size - rem.size));
+        rem = std::move(rem_padded);
+    }
+
+    // Challenges for the tLookup proof
+    auto u_proof = random_vec(ceilLog2(rem.size));
+    auto v_proof = random_vec(ceilLog2(rem.size));
+
     auto rand_temp = random_vec(2);
     vector<Polynomial> proof;
 
-    auto rem = rem_tensor_ptr -> pad({rem_tensor_ptr -> size});
     auto m = tl_rem.prep(rem);
 
     // cout << X << endl;
@@ -60,7 +75,7 @@ vector<Claim> Rescaling::prove(const FrTensor& X, const FrTensor& X_)
     // cout << m << endl;
     // cout << tl_rem.table << endl;
     
-    if (X(u) != X_(u) * Fr_t({scaling_factor, 0, 0, 0, 0, 0, 0, 0}) + rem(u))
+    if (X(u_check) != X_(u_check) * Fr_t({scaling_factor, 0, 0, 0, 0, 0, 0, 0}) + (*rem_tensor_ptr)(u_check))
     {
         throw std::runtime_error("Error: the rem is not correct.");
     }
@@ -70,7 +85,7 @@ vector<Claim> Rescaling::prove(const FrTensor& X, const FrTensor& X_)
     // cout << tl_rem.table << endl;
     // cout << m*tl_rem.table << endl;
     // cout << (m*tl_rem.table).sum() << endl;
-    tl_rem.prove(rem, m, rand_temp[0], rand_temp[1], u, v, proof);
+    tl_rem.prove(rem, m, rand_temp[0], rand_temp[1], u_proof, v_proof, proof);
 
     
     

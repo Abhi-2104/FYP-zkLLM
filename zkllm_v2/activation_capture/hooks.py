@@ -29,6 +29,11 @@ class ActivationHookManager:
         # Changed to dict of dicts: {layer_idx: {activation_name: tensor}}
         self.activations: Dict[int, Dict[str, torch.Tensor]] = {}
         
+        # New counters for targeted capture
+        self.target_step_idx: int = 0      # Which generation step to capture (0 = prefill)
+        self.current_step: int = 0         # Logical counter incremented by manager
+        self.target_token_idx: int = -1    # Which token index within that step to capture (-1 = last)
+        
     def register_layer_hooks(self, layer_idx: int, layer_module: nn.Module):
         """
         Register hooks for a single transformer layer.
@@ -51,11 +56,17 @@ class ActivationHookManager:
         # This is: layer-{i}-input-rmsnorm-input.bin
         def capture_block_input(module, input):
             """Pre-hook: captures input to the entire transformer block"""
-            hidden_states = input[0]  # Extract from tuple
-            self.activations[layer_idx]['block_input'] = hidden_states.detach().clone()
-            
-            if self.verbose:
-                print(f"  ✓ Captured layer-{layer_idx}-block-input: {tuple(hidden_states.shape)}")
+            if self.current_step == self.target_step_idx:
+                hidden_states = input[0]  # Extract from tuple
+                # Slice to target token (e.g. last token for decode)
+                if self.target_token_idx is not None and hidden_states.dim() >= 2:
+                    if hidden_states.shape[1] > 1: # Only slice if more than 1 token
+                        hidden_states = hidden_states[:, [self.target_token_idx % hidden_states.shape[1]], :]
+                
+                self.activations[layer_idx]['block_input'] = hidden_states.detach().clone()
+                
+                if self.verbose:
+                    print(f"  ✓ Captured layer-{layer_idx}-block-input: {tuple(hidden_states.shape)}")
         
         handle = layer_module.register_forward_pre_hook(capture_block_input)
         self.hooks.append(handle)
@@ -65,10 +76,16 @@ class ActivationHookManager:
         # This becomes input to Q, K, V projections
         def capture_input_norm_output(module, input, output):
             """Forward hook: captures output of input RMSNorm"""
-            self.activations[layer_idx]['input_layernorm_output'] = output.detach().clone()
-            
-            if self.verbose:
-                print(f"  ✓ Captured layer-{layer_idx}-input-norm-output: {tuple(output.shape)}")
+            if self.current_step == self.target_step_idx:
+                hidden_states = output
+                if self.target_token_idx is not None and hidden_states.dim() >= 2:
+                    if hidden_states.shape[1] > 1:
+                        hidden_states = hidden_states[:, [self.target_token_idx % hidden_states.shape[1]], :]
+                
+                self.activations[layer_idx]['input_layernorm_output'] = hidden_states.detach().clone()
+                
+                if self.verbose:
+                    print(f"  ✓ Captured layer-{layer_idx}-input-norm-output: {tuple(hidden_states.shape)}")
         
         handle = layer_module.input_layernorm.register_forward_hook(capture_input_norm_output)
         self.hooks.append(handle)
@@ -79,11 +96,16 @@ class ActivationHookManager:
         # This happens BEFORE post_attention_layernorm
         def capture_post_attn_residual(module, input):
             """Pre-hook on post_attention_layernorm: captures input to it"""
-            hidden_states = input[0]  # This is residual + attn_output
-            self.activations[layer_idx]['post_attn_residual'] = hidden_states.detach().clone()
-            
-            if self.verbose:
-                print(f"  ✓ Captured layer-{layer_idx}-post-attn-residual: {tuple(hidden_states.shape)}")
+            if self.current_step == self.target_step_idx:
+                hidden_states = input[0]  # This is residual + attn_output
+                if self.target_token_idx is not None and hidden_states.dim() >= 2:
+                    if hidden_states.shape[1] > 1:
+                        hidden_states = hidden_states[:, [self.target_token_idx % hidden_states.shape[1]], :]
+                
+                self.activations[layer_idx]['post_attn_residual'] = hidden_states.detach().clone()
+                
+                if self.verbose:
+                    print(f"  ✓ Captured layer-{layer_idx}-post-attn-residual: {tuple(hidden_states.shape)}")
         
         handle = layer_module.post_attention_layernorm.register_forward_pre_hook(capture_post_attn_residual)
         self.hooks.append(handle)
@@ -92,10 +114,16 @@ class ActivationHookManager:
         # This is: layer-{i}-ffn-activation.bin
         def capture_ffn_input(module, input, output):
             """Forward hook: captures output of post_attention_layernorm (input to FFN)"""
-            self.activations[layer_idx]['ffn_input'] = output.detach().clone()
-            
-            if self.verbose:
-                print(f"  ✓ Captured layer-{layer_idx}-ffn-input: {tuple(output.shape)}")
+            if self.current_step == self.target_step_idx:
+                hidden_states = output
+                if self.target_token_idx is not None and hidden_states.dim() >= 2:
+                    if hidden_states.shape[1] > 1:
+                        hidden_states = hidden_states[:, [self.target_token_idx % hidden_states.shape[1]], :]
+                
+                self.activations[layer_idx]['ffn_input'] = hidden_states.detach().clone()
+                
+                if self.verbose:
+                    print(f"  ✓ Captured layer-{layer_idx}-ffn-input: {tuple(hidden_states.shape)}")
         
         handle = layer_module.post_attention_layernorm.register_forward_hook(capture_ffn_input)
         self.hooks.append(handle)
@@ -104,10 +132,16 @@ class ActivationHookManager:
         # This will be used to compute block_output = post_attn_residual + mlp_output
         def capture_mlp_output(module, input, output):
             """Forward hook: captures output of MLP/FFN"""
-            self.activations[layer_idx]['mlp_output'] = output.detach().clone()
-            
-            if self.verbose:
-                print(f"  ✓ Captured layer-{layer_idx}-mlp-output: {tuple(output.shape)}")
+            if self.current_step == self.target_step_idx:
+                hidden_states = output
+                if self.target_token_idx is not None and hidden_states.dim() >= 2:
+                    if hidden_states.shape[1] > 1:
+                        hidden_states = hidden_states[:, [self.target_token_idx % hidden_states.shape[1]], :]
+                
+                self.activations[layer_idx]['mlp_output'] = hidden_states.detach().clone()
+                
+                if self.verbose:
+                    print(f"  ✓ Captured layer-{layer_idx}-mlp-output: {tuple(hidden_states.shape)}")
         
         handle = layer_module.mlp.register_forward_hook(capture_mlp_output)
         self.hooks.append(handle)
@@ -119,15 +153,21 @@ class ActivationHookManager:
         # The block output is the final output of the layer module
         def capture_block_output(module, input, output):
             """Forward hook: captures final output of transformer block"""
-            # output is a tuple (hidden_states, ...) for some models
-            if isinstance(output, tuple):
-                hidden_states = output[0]
-            else:
-                hidden_states = output
-            self.activations[layer_idx]['block_output'] = hidden_states.detach().clone()
-            
-            if self.verbose:
-                print(f"  ✓ Captured layer-{layer_idx}-block-output: {tuple(hidden_states.shape)}")
+            if self.current_step == self.target_step_idx:
+                # output is a tuple (hidden_states, ...) for some models
+                if isinstance(output, tuple):
+                    hidden_states = output[0]
+                else:
+                    hidden_states = output
+                    
+                if self.target_token_idx is not None and hidden_states.dim() >= 2:
+                    if hidden_states.shape[1] > 1:
+                        hidden_states = hidden_states[:, [self.target_token_idx % hidden_states.shape[1]], :]
+                        
+                self.activations[layer_idx]['block_output'] = hidden_states.detach().clone()
+                
+                if self.verbose:
+                    print(f"  ✓ Captured layer-{layer_idx}-block-output: {tuple(hidden_states.shape)}")
         
         handle = layer_module.register_forward_hook(capture_block_output)
         self.hooks.append(handle)

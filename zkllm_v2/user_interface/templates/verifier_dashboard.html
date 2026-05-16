@@ -350,7 +350,8 @@
                     </button>
                 </div>
 
-                <!-- Simulation Tools (Resilience Testing) -->
+                <!--
+                Simulation Tools (Resilience Testing) - temporarily disabled for demo.
                 <div class="card" style="margin-top: 1rem; border-color: var(--rose-border); opacity: 0.9;">
                     <h4 style="font-size: 0.75rem; color: var(--rose); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;">Resilience Testbed</h4>
                     <div style="display: flex; flex-direction: column; gap: 0.5rem;">
@@ -364,6 +365,7 @@
                         </button>
                     </div>
                 </div>
+                -->
             </div>
 
             <!-- Right: Progress + Terminals -->
@@ -896,6 +898,25 @@
             MODULES.forEach(m => setModuleState(m.key, ''));
         }
 
+        function setVerifierStatusBadge(kind, text) {
+            const badge = document.getElementById('verifier-status-badge');
+            if (!badge) return;
+            const label = text || (kind === 'running' ? 'Verifying' : kind === 'success' ? 'Verification Complete' : kind === 'failed' ? 'Verification Failed' : 'Idle');
+            if (kind === 'running') {
+                badge.className = 'badge badge-warning';
+                badge.innerHTML = `<span class="dot" style="background:var(--amber)"></span> ${label}`;
+            } else if (kind === 'success') {
+                badge.className = 'badge badge-success';
+                badge.innerHTML = `<span class="dot" style="background:var(--emerald)"></span> ${label}`;
+            } else if (kind === 'failed') {
+                badge.className = 'badge badge-rose';
+                badge.innerHTML = `<span class="dot" style="background:var(--rose)"></span> ${label}`;
+            } else {
+                badge.className = 'badge badge-neutral';
+                badge.innerHTML = '<span class="dot"></span> Idle';
+            }
+        }
+
         function updateTracker(data) {
             const box = document.getElementById('verify-tracker-box');
             if (box) box.style.display = '';
@@ -907,6 +928,7 @@
             if (el('tracker-bar-label')) el('tracker-bar-label').textContent = `Layer ${data.layer} / ${data.end_layer}`;
             if (el('tracker-layer-label')) el('tracker-layer-label').textContent =
                 `Auditing Layer ${data.layer}: ${data.module_label || ''}`;
+            setVerifierStatusBadge('running', `Verifying ${pct}%`);
 
             // Reset all modules then set current
             resetModules();
@@ -964,19 +986,27 @@
             }
         }
 
-        function onVerifyComplete(data) {
+        function onVerifyComplete(data, options = {}) {
             const box = document.getElementById('verify-tracker-box');
             if (box) {
+                box.style.display = '';
                 const fill = document.getElementById('tracker-bar-fill');
                 if (fill) fill.style.width = data.success ? '100%' : fill.style.width;
                 const pct = document.getElementById('tracker-pct');
                 if (pct && data.success) pct.textContent = '100%';
+                const layerLabel = document.getElementById('tracker-layer-label');
+                if (layerLabel) {
+                    layerLabel.textContent = data.success
+                        ? 'Verification complete. All selected layers validated.'
+                        : 'Verification finished with failures. Review module results.';
+                }
             }
             if (data.success) {
                 // Mark all layers done if success.
                 MODULES.forEach(m => setModuleState(m.key, 'done'));
                 const pills = document.querySelectorAll('.layer-pill');
                 pills.forEach(p => p.className = 'layer-pill done');
+                setVerifierStatusBadge('success', 'Verification Complete');
             } else {
                 // If failed, make current layer explicit and current module failed.
                 const layer = Number.isFinite(Number(verifyState.currentLayer)) ? verifyState.currentLayer : verifyState.startLayer;
@@ -984,6 +1014,11 @@
                 if (Number.isFinite(Number(verifyState.currentModuleIdx)) && verifyState.currentModuleIdx >= 0 && verifyState.currentModuleIdx < MODULES.length) {
                     setModuleState(MODULES[verifyState.currentModuleIdx].key, 'failed');
                 }
+                setVerifierStatusBadge('failed', 'Verification Failed');
+            }
+
+            if (options.skipRefresh) {
+                return;
             }
 
             // Force immediate state refresh to avoid stale RUNNING badges on very fast runs.
@@ -1071,6 +1106,68 @@
         }, 8000);
 
         // Expose for startVerification hook
+        window._updateVerifyTrackerFromStatus = function(statusData) {
+            if (!statusData || typeof statusData !== 'object') return;
+
+            const progress = statusData.progress && typeof statusData.progress === 'object'
+                ? statusData.progress
+                : null;
+
+            if (progress) {
+                const start = Number.isFinite(Number(progress.start_layer)) ? Number(progress.start_layer) : verifyState.startLayer;
+                const end = Number.isFinite(Number(progress.end_layer)) ? Number(progress.end_layer) : verifyState.endLayer;
+                const layer = Number.isFinite(Number(progress.layer)) ? Number(progress.layer) : start;
+                const moduleIdx = Number.isFinite(Number(progress.module_idx)) ? Number(progress.module_idx) : verifyState.currentModuleIdx;
+                const pct = Number.isFinite(Number(progress.percent)) ? Number(progress.percent) : 0;
+
+                if (verifyState.startLayer !== start || verifyState.endLayer !== end) {
+                    verifyState.startLayer = start;
+                    verifyState.endLayer = end;
+                    buildLayerPills(start, end);
+                } else if (!document.getElementById('layer-pills')?.children.length) {
+                    buildLayerPills(start, end);
+                }
+
+                verifyState.currentLayer = layer;
+                verifyState.currentModuleIdx = moduleIdx;
+
+                updateTracker({
+                    start_layer: start,
+                    end_layer: end,
+                    layer,
+                    module_idx: moduleIdx,
+                    module: progress.module,
+                    module_label: progress.module_label,
+                    percent: pct,
+                });
+            }
+
+            if (Number.isFinite(Number(statusData.pass_count))) {
+                verifyState.passed = Number(statusData.pass_count);
+            }
+            if (Number.isFinite(Number(statusData.fail_count))) {
+                verifyState.failed = Number(statusData.fail_count);
+            }
+
+            const total = verifyState.passed + verifyState.failed;
+            const summary = document.getElementById('results-summary');
+            const rfbox = document.getElementById('results-feed-box');
+            if (summary && total > 0) {
+                summary.className = verifyState.failed > 0 ? 'badge badge-rose' : 'badge badge-success';
+                summary.textContent = `${verifyState.passed}✓ / ${verifyState.failed}✗ of ${total}`;
+            }
+            if (rfbox && total > 0) {
+                rfbox.style.display = '';
+            }
+
+            if (statusData.active) {
+                const pct = Number.isFinite(Number(progress?.percent)) ? Number(progress.percent) : 0;
+                setVerifierStatusBadge('running', `Verifying ${pct}%`);
+            } else if (statusData.success === true || statusData.success === false) {
+                onVerifyComplete({ success: !!statusData.success }, { skipRefresh: true });
+            }
+        };
+
         window._initVerifyTracker = function(start, end) {
             verifyState = { startLayer: start, endLayer: end, currentLayer: start,
                 currentModuleIdx: 0, percent: 0, layerStatus: {}, moduleStatus: {},
@@ -1085,6 +1182,7 @@
             if (rfbox) rfbox.style.display = 'none';
             const summary = document.getElementById('results-summary');
             if (summary) { summary.textContent = '—'; summary.className = 'badge badge-neutral'; }
+            setVerifierStatusBadge('running', 'Verifying 0%');
         };
     })();
     </script>

@@ -62,7 +62,6 @@ if __name__ == '__main__':
     X_int = np.fromfile(args.input_file, dtype=np.int32, count=args.seq_len * embed_dim)
     X = torch.tensor(X_int.reshape(args.seq_len, embed_dim), device = 0, dtype = float) / (1 << 16)
     rms_inv = 1 / torch.sqrt(torch.mean(X ** 2, dim = 1) + variance_epsilon)
-
     workdir = args.workdir or f'./zkllm-workdir/Llama-2-{args.model_size}b'
     os.makedirs(workdir, exist_ok=True)
     layer_prefix = f'layer-{args.layer}'

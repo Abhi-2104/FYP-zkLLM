@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -98,6 +99,13 @@ Requirements:
                         help='Output directory for saved activations (default: activations/)')
     parser.add_argument('--max_seq_len', type=int, default=None,
                         help='Optional max token length for capture (input is truncated if longer)')
+    parser.add_argument('--max_new_tokens', type=int, default=1,
+                        help='Number of continuation tokens to generate after capture (default: 1)')
+    parser.add_argument('--capture_mode', type=str, default='auto',
+                        choices=['auto', 'prefill', 'random_generated', 'specific_generated', 'hybrid'],
+                        help='Activation capture mode (default: auto)')
+    parser.add_argument('--target_generated_step', type=int, default=None,
+                        help='Decode step (1-based) for specific_generated mode')
     parser.add_argument('--cpu', action='store_true',
                         help='Force CPU loading (slower but uses swap file)')
     parser.add_argument('--show_mapping', action='store_true',
@@ -150,6 +158,10 @@ Requirements:
         print(f"Total activations to capture: {num_layers * 4}")
         if args.max_seq_len:
             print(f"Max sequence length: {args.max_seq_len} tokens")
+        print(f"Max new tokens: {max(1, int(args.max_new_tokens))}")
+        print(f"Capture mode: {args.capture_mode}")
+        if args.target_generated_step is not None:
+            print(f"Target generated step: {args.target_generated_step}")
         print(f"Output directory: {args.output_dir}/")
         print(f"Loading mode: {'CPU-only' if args.cpu else '4-bit GPU (if available)'}")
         print(f"{'='*70}\n")
@@ -167,7 +179,10 @@ Requirements:
             text=args.text,
             output_dir=args.output_dir,
             num_layers=num_layers,
-            max_seq_len=args.max_seq_len
+            max_seq_len=args.max_seq_len,
+            max_new_tokens=args.max_new_tokens,
+            capture_mode=args.capture_mode,
+            target_generated_step=args.target_generated_step,
         )
         
         print(f"\n{'='*70}")
@@ -175,10 +190,16 @@ Requirements:
         print(f"{'='*70}")
         print(f"Input text: '{result['input_text']}'")
         print(f"Predicted next token: '{result['predicted_token']}'")
+        print(f"Generated token count: {result.get('num_generated_tokens', 1)}")
+        print(f"Generated text: {result.get('generated_text', result['predicted_token'])}")
+        print(f"Generated text JSON: {json.dumps(result.get('generated_text', result['predicted_token']))}")
+        print(f"Capture mode (effective): {result.get('capture_mode', args.capture_mode)}")
         print(f"Sequence length: {result['seq_len']} tokens")
         print(f"Inference time: {result['inference_time']:.2f} seconds")
         print(f"Layers captured: {num_layers}/{total_layers}")
         print(f"Activations saved: {result['num_activations']}")
+        if result.get('generation_warning'):
+            print(f"Generation warning: {result['generation_warning']}")
         print(f"Output directory: {result['output_dir']}/")
         print(f"{'='*70}")
         print(f"\n✓ Ready for proof generation!")
